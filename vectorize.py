@@ -1297,7 +1297,9 @@ def force_close_free_l_corners(segments: List[Dict],
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
-def t_snap_with_extension(segments: List[Dict], tol: float) -> List[Dict]:
+def t_snap_with_extension(segments: List[Dict], tol: float,
+                          masks: Dict[str, np.ndarray] = None,
+                          min_support: float = 0.6) -> List[Dict]:
     """Step 3: for each remaining degree-1 endpoint, find the closest
     orthogonal trunk segment whose perpendicular distance is within tol.
 
@@ -1306,6 +1308,10 @@ def t_snap_with_extension(segments: List[Dict], tol: float) -> List[Dict]:
     one of the trunk's ends), EXTEND the trunk so its body covers the
     new joint, then snap. Walls are never extended to accommodate
     chromatic endpoints.
+
+    If `masks` is provided, the proposed trunk-extension stretch is
+    sampled against the trunk's own type mask; only paths with >=
+    `min_support` fractional coverage are accepted.
     """
     segs = [dict(s) for s in segments]
 
@@ -1397,6 +1403,30 @@ def t_snap_with_extension(segments: List[Dict], tol: float) -> List[Dict]:
 
                 trunk_idx, snap_x, snap_y, need_extend, trunk_axis = best
                 trunk = segs[trunk_idx]
+
+                # Mask evidence gate: a trunk extension is only valid if the
+                # source mask of the trunk's own type backs the new stretch.
+                if need_extend is not None and masks is not None:
+                    trunk_mask = masks.get(trunk["type"])
+                    if trunk_mask is not None:
+                        if trunk_axis == "v":
+                            old_lo, old_hi = sorted((trunk["y1"], trunk["y2"]))
+                            ext_lo = min(snap_y, old_lo) if need_extend == "lo" else old_hi
+                            ext_hi = old_lo if need_extend == "lo" else max(snap_y, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, snap_x, ext_lo, snap_x, ext_hi)
+                                if support < min_support:
+                                    continue
+                        else:
+                            old_lo, old_hi = sorted((trunk["x1"], trunk["x2"]))
+                            ext_lo = min(snap_x, old_lo) if need_extend == "lo" else old_hi
+                            ext_hi = old_lo if need_extend == "lo" else max(snap_x, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, ext_lo, snap_y, ext_hi, snap_y)
+                                if support < min_support:
+                                    continue
 
                 # Extend the trunk if needed so its body covers the snap point.
                 if need_extend is not None:
@@ -1632,7 +1662,9 @@ def brute_force_ray_extend(lines: List[Dict],
 
 def extend_trunk_to_loose(lines: List[Dict],
                           perp_tol: float,
-                          gap_tol: float) -> None:
+                          gap_tol: float,
+                          masks: Dict[str, np.ndarray] = None,
+                          min_support: float = 0.6) -> None:
     """Mutate `lines` IN PLACE: for each loose endpoint that's close to an
     orthogonal trunk's axis line (perp distance <= perp_tol) but past the
     trunk's body by <= gap_tol, extend the trunk to reach the endpoint and
@@ -1643,6 +1675,11 @@ def extend_trunk_to_loose(lines: List[Dict],
     horizontal — the brute-force pass refused to consider the vertical as
     a snap target because the y-distance exceeded its tolerance, leaving
     a 48-px gap. Here we explicitly accept that gap and extend the trunk.
+
+    If `masks` is provided, the proposed trunk-extension path is sampled
+    against the trunk's own type mask; only paths with >= `min_support`
+    fractional coverage are accepted. This stops the trunk from being
+    extended through white space to swallow an unrelated loose endpoint.
     """
     from collections import Counter
 
@@ -1730,6 +1767,32 @@ def extend_trunk_to_loose(lines: List[Dict],
                 trunk_idx, snap_x, snap_y, extend_side, trunk_axis = best
                 trunk = lines[trunk_idx]
 
+                # Mask evidence gate: if the trunk needs to grow, the new
+                # body-extension stretch must be backed by source pixels of
+                # the trunk's own type — otherwise we'd be stretching a wall
+                # through empty space to swallow an unrelated loose endpoint.
+                if extend_side is not None and masks is not None:
+                    trunk_mask = masks.get(trunk["type"])
+                    if trunk_mask is not None:
+                        if trunk_axis == "v":
+                            old_lo, old_hi = sorted((trunk["y1"], trunk["y2"]))
+                            ext_lo = min(snap_y, old_lo) if extend_side == "lo" else old_hi
+                            ext_hi = old_lo if extend_side == "lo" else max(snap_y, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, snap_x, ext_lo, snap_x, ext_hi)
+                                if support < min_support:
+                                    continue
+                        else:
+                            old_lo, old_hi = sorted((trunk["x1"], trunk["x2"]))
+                            ext_lo = min(snap_x, old_lo) if extend_side == "lo" else old_hi
+                            ext_hi = old_lo if extend_side == "lo" else max(snap_x, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, ext_lo, snap_y, ext_hi, snap_y)
+                                if support < min_support:
+                                    continue
+
                 # Extend the trunk if the joint is past its body.
                 if extend_side is not None:
                     if trunk_axis == "v":
@@ -1776,9 +1839,45 @@ def extend_trunk_to_loose(lines: List[Dict],
             break
 
 
+def _path_mask_support(mask: np.ndarray, x1: float, y1: float,
+                       x2: float, y2: float, perp: int = 3) -> float:
+    """Return the fraction of pixels along the (x1,y1)->(x2,y2) line whose
+    `perp`-pixel-thick neighbourhood in `mask` is non-zero.
+
+    Used to gate any pass that wants to *create or extend* geometry: if the
+    proposed path has no support in the source mask, the change is rejected.
+    A return value near 1.0 means the source has a continuous line there;
+    near 0.0 means the path crosses white space.
+    """
+    if mask is None:
+        return 1.0  # no mask available -> don't block (legacy callers)
+    h, w = mask.shape[:2]
+    length = float(np.hypot(x2 - x1, y2 - y1))
+    if length < 1.0:
+        return 1.0
+    n = max(8, int(round(length)))
+    xs = np.linspace(x1, x2, n)
+    ys = np.linspace(y1, y2, n)
+    hit = 0
+    for x, y in zip(xs, ys):
+        ix = int(round(x))
+        iy = int(round(y))
+        x0 = max(0, ix - perp)
+        x1c = min(w, ix + perp + 1)
+        y0 = max(0, iy - perp)
+        y1c = min(h, iy + perp + 1)
+        if x1c <= x0 or y1c <= y0:
+            continue
+        if mask[y0:y1c, x0:x1c].any():
+            hit += 1
+    return hit / n
+
+
 def insert_missing_connectors(lines: List[Dict],
                               colinear_tol: float,
-                              max_len: float) -> None:
+                              max_len: float,
+                              wall_mask: np.ndarray = None,
+                              min_support: float = 0.6) -> None:
     """Mutate `lines` IN PLACE: insert new wall segments to bridge pairs of
     loose endpoints that share the same x (or y) within colinear_tol and
     whose perpendicular separation is <= max_len.
@@ -1787,6 +1886,12 @@ def insert_missing_connectors(lines: List[Dict],
     are present but the small wall segment that would close them into a
     single closed rectangle didn't survive the pipeline. We synthesise it
     here so the geometry is watertight.
+
+    If `wall_mask` is provided, the proposed connector path is sampled
+    against it; only paths with >= `min_support` fractional coverage are
+    inserted. This prevents the synthesis of phantom walls across white
+    space (e.g. across an open doorway), which is the common failure mode
+    when two unrelated loose endpoints happen to share an axis.
     """
     # Snapshot the current loose endpoints. We will append new segments
     # as we go, but only consider the ORIGINAL loose endpoints as
@@ -1826,6 +1931,12 @@ def insert_missing_connectors(lines: List[Dict],
             xj, yj = loose[best]
             cx = 0.5 * (xi + xj)
             ylo, yhi = (yi, yj) if yi < yj else (yj, yi)
+            # Mask evidence gate: only synthesize if the source actually has
+            # wall pixels along the proposed connector.
+            if wall_mask is not None:
+                support = _path_mask_support(wall_mask, cx, ylo, cx, yhi)
+                if support < min_support:
+                    continue
             # Snap both endpoints' x onto cx by mutating the owning segments.
             for s in lines:
                 if s["x1"] == xi and s["y1"] == yi:
@@ -1872,6 +1983,10 @@ def insert_missing_connectors(lines: List[Dict],
             xj, yj = loose[best]
             cy = 0.5 * (yi + yj)
             xlo, xhi = (xi, xj) if xi < xj else (xj, xi)
+            if wall_mask is not None:
+                support = _path_mask_support(wall_mask, xlo, cy, xhi, cy)
+                if support < min_support:
+                    continue
             for s in lines:
                 if s["x1"] == xi and s["y1"] == yi:
                     s["y1"] = cy
@@ -2250,7 +2365,8 @@ def main() -> None:
     s8 = force_close_free_l_corners(s7, GAP_CLOSE_TOL_PX)
     # (3) T-snap with trunk auto-extension: a loose endpoint that projects
     #     past a trunk's body within tol triggers an extension of the trunk.
-    s8 = t_snap_with_extension(s8, GAP_CLOSE_TOL_PX)
+    #     The masks gate prevents extending through white space.
+    s8 = t_snap_with_extension(s8, GAP_CLOSE_TOL_PX, masks=masks)
     # Re-run free-L closure on whatever the T-extension exposed, then merge.
     s8 = force_close_free_l_corners(s8, GAP_CLOSE_TOL_PX)
     s8 = manhattan_ultimate_merge(s8)
@@ -2271,13 +2387,18 @@ def main() -> None:
     # degree of that point.
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Trunk extension: a loose endpoint near an orthogonal trunk's line
-    # but past its body extends the trunk to reach the joint.
-    extend_trunk_to_loose(snapped, TRUNK_EXTEND_PERP_PX, TRUNK_EXTEND_GAP_PX)
+    # but past its body extends the trunk to reach the joint.  The masks
+    # gate keeps the extension from sweeping through white space.
+    extend_trunk_to_loose(snapped, TRUNK_EXTEND_PERP_PX, TRUNK_EXTEND_GAP_PX,
+                          masks=masks)
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Insert missing connectors: pairs of loose endpoints that share an x
     # (or y) but were never linked by a real segment get a synthetic wall
-    # bridging them, closing the L into a watertight rectangle.
-    insert_missing_connectors(snapped, COLINEAR_LOOSE_TOL_PX, CONNECTOR_MAX_LEN_PX)
+    # bridging them, closing the L into a watertight rectangle. Gated on
+    # the wall mask so phantom walls across open doorways aren't created.
+    insert_missing_connectors(snapped, COLINEAR_LOOSE_TOL_PX,
+                              CONNECTOR_MAX_LEN_PX,
+                              wall_mask=masks.get("wall"))
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Final 2-px endpoint fusion: snap any near-coincident endpoints to one
     # canonical (wall-priority) coordinate so micro-deltas vanish.
