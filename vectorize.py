@@ -149,8 +149,30 @@ def segment_colors(bgr: np.ndarray) -> Dict[str, np.ndarray]:
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
 
-    # Black wall: very low value, regardless of hue/saturation.
-    wall = (v < 80).astype(np.uint8) * 255
+    # Black wall: union of two detectors so we catch both pure black walls and
+    # faded grey outlines (e.g. exterior shells in sg2.png).
+    #   strong: very low value, hue/sat irrelevant.
+    #   faint:  low-saturation pixel that's clearly darker than the page
+    #           background. The faint detector only fires when there's a real
+    #           bimodal V distribution in the low-sat region; otherwise text
+    #           anti-aliasing on a white page leaks in and gets skeletonized
+    #           into spurious segments.
+    strong_wall = (v < 80)
+    low_sat = s < 40
+    faint_wall = np.zeros_like(strong_wall)
+    if low_sat.any():
+        v_lowsat = v[low_sat]
+        otsu_thr, _ = cv2.threshold(v_lowsat, 0, 255,
+                                    cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Two guards against false positives:
+        #   1. Hard cap at 160 — anything brighter is page background, not wall.
+        #   2. The dark cluster must be a meaningful share of low-sat pixels.
+        #      On a mostly-white page with only black text, the dark side is
+        #      <1% and Otsu's cutoff sits in the anti-alias ramp; ignore it.
+        dark_frac = float((v_lowsat < otsu_thr).sum()) / float(v_lowsat.size)
+        if otsu_thr <= 160 and dark_frac >= 0.02:
+            faint_wall = low_sat & (v < otsu_thr)
+    wall = (strong_wall | faint_wall).astype(np.uint8) * 255
 
     # Blue window: hue ~ 100-130 in OpenCV's 0-179 scale, saturation/value high.
     window = cv2.inRange(hsv, (90, 80, 80), (135, 255, 255))
