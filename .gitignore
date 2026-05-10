@@ -1,0 +1,21 @@
+# Test inputs and per-run outputs (large, not needed in repo)
+srcImg/
+output/
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.local

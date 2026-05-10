@@ -1,0 +1,14 @@
+# Algorithm dependencies. Pinned to the versions the geometric tolerances
+# were tuned against — bumping any of these (especially scikit-image) can
+# shift skeletonize output by a pixel or two and break the source.png
+# bit-identical baseline. If you upgrade, re-run all three test images and
+# eyeball the previews.
+opencv-python-headless==4.10.0.84
+numpy==2.1.3
+networkx==3.4.2
+scikit-image==0.25.0
+
+# Web layer.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20

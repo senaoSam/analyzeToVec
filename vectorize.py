@@ -32,6 +32,14 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "srcImg")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 DEFAULT_SRC_NAME = "source.png"
 
+# Reference image dimension (the size at which the default tolerance constants
+# below were tuned — i.e. source.png, 1200x895). For larger images, geometric
+# tolerances are scaled up by max(h, w) / REFERENCE_DIM so that absolute pixel
+# gaps from skeletonization at thick walls (which scale with image size) get
+# closed correctly. The factor is clamped to >= 1.0 so smaller images are not
+# tightened (and source.png itself stays at 1.0 → no behaviour change).
+REFERENCE_DIM_PX = 1200.0
+
 # Snap tolerance for merging near-coincident endpoints across all color layers.
 SNAP_TOLERANCE_PX = 6.0
 
@@ -88,7 +96,7 @@ MANHATTAN_SNAP_TOL_PX = 15.0
 # Two parallel same-type segments whose perpendicular distance is below this
 # and whose body extents overlap are treated as one duplicated centerline
 # (skeletonization artefact at thick walls) and merged into one centred line.
-PARALLEL_MERGE_TOL_PX = 10.0
+PARALLEL_MERGE_TOL_PX = 13.0
 
 # Grid-snap tolerance: an endpoint within this perpendicular distance of an
 # orthogonal reference line is extended (or shortened) onto that line exactly.
@@ -120,6 +128,12 @@ CONNECTOR_MAX_LEN_PX = 80.0
 # trunk to swallow the joint.
 TRUNK_EXTEND_PERP_PX = 8.0
 TRUNK_EXTEND_GAP_PX = 60.0
+
+# Mask-gated asymmetric L-extend: per-leg max extension for the closure pass
+# that fixes thick-wall L-corners where the two skeleton centerlines miss
+# each other in *both* axes simultaneously. The pass is gated by the wall
+# mask so this can be relatively generous without inventing geometry.
+L_EXT_ASYM_PX = 50.0
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +700,90 @@ def extend_to_intersect(segments: List[Dict], tol: float) -> List[Dict]:
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
+def mask_gated_l_extend(segments: List[Dict],
+                        max_gap: float,
+                        masks: Dict[str, np.ndarray] = None,
+                        min_support: float = 0.85) -> List[Dict]:
+    """Close asymmetric L-corner gaps that the symmetric ``extend_to_intersect``
+    rejects because one leg's extension is much longer than the other.
+
+    For each (H, V) pair of the same type whose nearest endpoints don't yet
+    share a coordinate, consider the implied L-corner at (V.x, H.y). If both
+    extension legs (the H stretching to V.x, and the V stretching to H.y) are
+    backed by the segment's source mask with at least ``min_support`` fractional
+    coverage, snap both endpoints to that intersection. Each leg may extend up
+    to ``max_gap`` pixels — the mask gate is what actually keeps this honest.
+
+    This is the fix for thick-wall transitions where the skeletonised
+    horizontal centreline ends a few pixels before the perpendicular wall and
+    the perpendicular's centreline starts on the *other side* of the corner —
+    so the two ends are separated in both axes simultaneously and the regular
+    extend_to_intersect (which requires both legs short) won't act.
+    """
+    if masks is None:
+        return [dict(s) for s in segments]
+    segs = [dict(s) for s in segments]
+    n = len(segs)
+    axis = [_seg_axis_strict(s) for s in segs]
+
+    for i in range(n):
+        if axis[i] != "h":
+            continue
+        h = segs[i]
+        h_y = h["y1"]
+        for j in range(n):
+            if axis[j] != "v":
+                continue
+            v = segs[j]
+            if v["type"] != h["type"]:
+                continue
+            v_x = v["x1"]
+
+            # Pick each segment's endpoint nearest to the candidate corner.
+            h_ends = (("1", h["x1"]), ("2", h["x2"]))
+            v_ends = (("1", v["y1"]), ("2", v["y2"]))
+            h_end = min(h_ends, key=lambda e: abs(e[1] - v_x))
+            v_end = min(v_ends, key=lambda e: abs(e[1] - h_y))
+
+            dx = abs(h_end[1] - v_x)
+            dy = abs(v_end[1] - h_y)
+            # Already coincident on either axis means the standard
+            # extend_to_intersect path already handled it (or there's nothing
+            # to do). We only act on the *both-axes* asymmetric case.
+            if dx < 2.0 or dy < 2.0:
+                continue
+            if dx > max_gap or dy > max_gap:
+                continue
+
+            # Reject if the corner sits *inside* either body (would make a
+            # degenerate snap). We want both ends to be the natural outer end.
+            h_lo, h_hi = sorted((h["x1"], h["x2"]))
+            v_lo, v_hi = sorted((v["y1"], v["y2"]))
+            if h_lo - 1 < v_x < h_hi + 1:
+                continue
+            if v_lo - 1 < h_y < v_hi + 1:
+                continue
+
+            type_mask = masks.get(h["type"])
+            if type_mask is None:
+                continue
+
+            # Mask gate: both extension legs must be solidly walked by mask
+            # pixels of the segment's own type.
+            h_support = _path_mask_support(type_mask, h_end[1], h_y, v_x, h_y)
+            if h_support < min_support:
+                continue
+            v_support = _path_mask_support(type_mask, v_x, v_end[1], v_x, h_y)
+            if v_support < min_support:
+                continue
+
+            # Snap both natural endpoints to the exact corner.
+            h[f"x{h_end[0]}"] = v_x
+            v[f"y{v_end[0]}"] = h_y
+
+    return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+
 def truncate_overshoots(segments: List[Dict], tol: float) -> List[Dict]:
     """After all snapping, scan each axis-aligned segment for endpoints that
     project past an orthogonal segment that would clearly serve as the corner.
@@ -1055,21 +1153,46 @@ def cluster_parallel_duplicates(segments: List[Dict],
                 line = s["x1"]
             items.append({"lo": lo, "hi": hi, "line": line, "len": hi - lo})
 
-        # Build undirected graph: edge between i and j when |line_i - line_j|
-        # <= perp_tol AND ranges overlap (including touch). Connected
-        # components become merge clusters.
+        # Build undirected graph linking segment pairs that should be merged.
+        # Two distinct cases must both be handled here:
+        #
+        #  (1) Near-collinear touching pieces. Same axis, tiny perpendicular
+        #      separation (a few pixels), ranges touch or overlap a little.
+        #      These are typically a single wall that the skeleton broke
+        #      into two pieces. Merge tolerance for this is small (~5 px).
+        #
+        #  (2) Thick-wall duplicate centerlines. A genuinely thick wall whose
+        #      mask skeletonized into two parallel ridges. Same axis, ranges
+        #      overlap substantially (>50% of the shorter), perp distance up
+        #      to perp_tol.
+        #
+        # A simple touch-merge with the full perp_tol would mis-fuse L-corners
+        # (one long wall touching a short perpendicular stub at the corner).
+        # Splitting the criterion as above keeps L-corners intact while still
+        # absorbing thick-wall duplicates.
+        TOUCH_PERP_TOL = 12.0
         g = nx.Graph()
         for k in range(len(items)):
             g.add_node(k)
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
                 a, b = items[i], items[j]
-                if abs(a["line"] - b["line"]) > perp_tol:
+                dline = abs(a["line"] - b["line"])
+                if dline > perp_tol:
                     continue
-                # Overlap or touch on the along-axis dimension.
-                if a["hi"] < b["lo"] or b["hi"] < a["lo"]:
+                ov_lo = max(a["lo"], b["lo"])
+                ov_hi = min(a["hi"], b["hi"])
+                overlap = ov_hi - ov_lo
+                shorter = min(a["len"], b["len"])
+                if shorter <= 0:
                     continue
-                g.add_edge(i, j)
+                # Case (1): near-collinear, ranges touch or overlap a bit.
+                if dline <= TOUCH_PERP_TOL and overlap >= -1e-6:
+                    g.add_edge(i, j)
+                    continue
+                # Case (2): thick-wall duplicate, requires real overlap.
+                if overlap >= 0.5 * shorter and overlap > 0:
+                    g.add_edge(i, j)
 
         for comp in nx.connected_components(g):
             comp = list(comp)
@@ -1245,9 +1368,44 @@ def force_close_free_l_corners(segments: List[Dict],
     intersection (V.x, H.y).
 
     Pair selection is greedy on closest-distance to keep the matching stable.
+
+    A degree-1 endpoint that already lies on the *interior body* of an
+    orthogonal trunk (i.e. it's a T-junction even though only one segment
+    technically has its endpoint here) is NOT considered free — moving it
+    would tear it off an existing connection. This guards against the
+    pathology where two close-but-distinct segments (the kind found at
+    a thick double-walled corner) trigger an L-closure that pulls a
+    body-anchored endpoint off its trunk.
     """
     segs = [dict(s) for s in segments]
     deg, _ = _build_degree_map(segs)
+
+    # Body-anchor index: for fast "is this endpoint on a trunk's body?" check.
+    # Use a small absolute tolerance (1 px) so we only catch exact-coincidence
+    # T-junctions that the merge passes already produced.
+    BODY_TOL = 1.0
+    h_bodies: List[Tuple[float, float, float]] = []  # (line_y, lo_x, hi_x)
+    v_bodies: List[Tuple[float, float, float]] = []  # (line_x, lo_y, hi_y)
+    for s in segs:
+        ax = _seg_axis_strict(s)
+        if ax == "h":
+            lo, hi = sorted((s["x1"], s["x2"]))
+            h_bodies.append((s["y1"], lo, hi))
+        elif ax == "v":
+            lo, hi = sorted((s["y1"], s["y2"]))
+            v_bodies.append((s["x1"], lo, hi))
+
+    def on_orthogonal_body(ex: float, ey: float, my_axis: str) -> bool:
+        # A horizontal endpoint anchors on a vertical trunk's body, and v.v.
+        if my_axis == "h":
+            for line_x, lo, hi in v_bodies:
+                if abs(ex - line_x) <= BODY_TOL and lo + BODY_TOL < ey < hi - BODY_TOL:
+                    return True
+        else:
+            for line_y, lo, hi in h_bodies:
+                if abs(ey - line_y) <= BODY_TOL and lo + BODY_TOL < ex < hi - BODY_TOL:
+                    return True
+        return False
 
     # Collect all degree-1 endpoints with their owning segment+end+axis.
     free: List[Dict] = []
@@ -1255,8 +1413,11 @@ def force_close_free_l_corners(segments: List[Dict],
         ax = _seg_axis_strict(s)
         for end in ("1", "2"):
             ex, ey = s[f"x{end}"], s[f"y{end}"]
-            if deg[_qkey(ex, ey)] == 1:
-                free.append({"i": i, "end": end, "x": ex, "y": ey, "axis": ax})
+            if deg[_qkey(ex, ey)] != 1:
+                continue
+            if on_orthogonal_body(ex, ey, ax):
+                continue
+            free.append({"i": i, "end": end, "x": ex, "y": ey, "axis": ax})
 
     # Build candidate (H-free, V-free) pairs and rank by distance.
     candidates: List[Tuple[float, int, int]] = []
@@ -2308,7 +2469,209 @@ def _resolve_src_path(name: str) -> str:
     return candidate
 
 
+def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
+    """Pure pipeline: BGR ndarray in, dict ``{"lines": [...], "stats": {...}}`` out.
+
+    No filesystem I/O, no print spam (unless ``verbose=True``). This is the
+    function the API calls — ``run_one`` is a thin I/O wrapper around it.
+    """
+    def _log(msg: str) -> None:
+        if verbose:
+            print(msg, flush=True)
+
+    if bgr is None or bgr.size == 0:
+        raise ValueError("empty image")
+    if bgr.ndim != 3 or bgr.shape[2] != 3:
+        raise ValueError(f"expected BGR image, got shape {bgr.shape}")
+
+    h, w = bgr.shape[:2]
+    _log(f"Image size: {w} x {h} px")
+
+    # Image-size-aware tolerance scale. Pegged to source.png (1200x895) so its
+    # output is bit-identical to the tuned baseline; larger images get
+    # proportionally larger geometric tolerances, since the gaps left by
+    # skeletonization at thick walls scale with image size.
+    scale = max(1.0, max(h, w) / REFERENCE_DIM_PX)
+    _log(f"Tolerance scale: {scale:.3f}x")
+    snap_tol = SNAP_TOLERANCE_PX * scale
+    colinear_tol = COLINEAR_TOL_PX * scale
+    merge_perp = MERGE_PERP_TOL_PX * scale
+    merge_gap = MERGE_GAP_TOL_PX * scale
+    t_snap = T_SNAP_TOL_PX * scale
+    l_extend = L_EXTEND_TOL_PX * scale
+    tail_prune = TAIL_PRUNE_LEN_PX * scale
+    manhattan_tol = MANHATTAN_SNAP_TOL_PX * scale
+    parallel_merge = PARALLEL_MERGE_TOL_PX * scale
+    grid_snap = GRID_SNAP_TOL_PX * scale
+    gap_close = GAP_CLOSE_TOL_PX * scale
+    gap_final = GAP_FINAL_PRUNE_PX * scale
+    ray_ext = RAY_EXT_TOL_PX * scale
+    ray_fuse = RAY_EXT_FUSE_PX * scale
+    colinear_loose = COLINEAR_LOOSE_TOL_PX * scale
+    connector_max = CONNECTOR_MAX_LEN_PX * scale
+    trunk_perp = TRUNK_EXTEND_PERP_PX * scale
+    trunk_gap = TRUNK_EXTEND_GAP_PX * scale
+    l_ext_asym = L_EXT_ASYM_PX * scale
+
+    _log("Color segmentation...")
+    masks = segment_colors(bgr)
+
+    typed_segments: List[Dict] = []
+    branch_stats = {}
+    for label, mask in masks.items():
+        _log(f"  Skeletonize ({label})...")
+        skel = skeletonize_mask(mask)
+        branches = extract_branches(skel)
+        segs = branches_to_segments(branches)
+        branch_stats[label] = (int(skel.sum()), len(branches), len(segs))
+        for x1, y1, x2, y2 in segs:
+            typed_segments.append({"type": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+
+    _log("Geometric optimization (may take a while on large images)...")
+    # --- Geometric optimization pipeline --------------------------------
+    # (1) Force orthogonality (segments within ±5° of an axis become exactly H/V).
+    s1 = axis_align_segments(typed_segments, AXIS_SNAP_DEG)
+    # Tight wall-anchored coordinate cluster so colinear walls share an x or y,
+    # without dragging genuinely-distinct walls together.
+    s1 = snap_colinear_coords(s1, colinear_tol)
+
+    # (2) Merge collinear same-type segments into a single longest span.
+    s2 = merge_collinear(s1, merge_perp, merge_gap)
+
+    # (3a) T-junction node-to-edge snap: chromatic endpoints onto wall bodies,
+    #      same-type endpoints onto own bodies. Walls never snap to chromatic.
+    s3 = t_junction_snap(s2, t_snap)
+    # (3b) L-corner extend-to-intersect: nearest endpoints of a perpendicular
+    #      pair are pulled to their exact intersection — extending if short,
+    #      truncating if they overshoot.
+    s3 = extend_to_intersect(s3, l_extend)
+    # (3c) Truncate any remaining overshoots: an endpoint sitting on the far
+    #      side of a perpendicular wall by less than tol gets clipped back.
+    s3 = truncate_overshoots(s3, l_extend)
+    # Re-merge after snapping; some segments may now align colinearly.
+    s3 = merge_collinear(s3, merge_perp, merge_gap)
+
+    # Wall-priority NetworkX node merge.
+    s4 = snap_endpoints(s3, snap_tol)
+
+    # (4) Prune dangling tails — strict definition that protects cross-type
+    #     connections (door/window jambs are never deleted).
+    s5 = prune_tails(s4, tail_prune)
+    s5 = snap_endpoints(s5, snap_tol)
+
+    # --- STRICT MANHATTAN ROUTING (zero diagonals) ----------------------
+    # (a) Force every segment to be exactly horizontal or exactly vertical.
+    s6 = manhattan_force_axis(s5)
+    # (b) Intersection-based L-corner snap (run twice to catch cascading).
+    s6 = manhattan_intersection_snap(s6, manhattan_tol)
+    s6 = manhattan_intersection_snap(s6, manhattan_tol)
+    # (c) T-junction projection onto orthogonal trunks.
+    s6 = manhattan_t_project(s6, manhattan_tol)
+    # (d) Ultimate collinear merge.
+    s6 = manhattan_ultimate_merge(s6)
+
+    # --- WATERTIGHT CLOSURE (kill duplicates + close gaps) --------------
+    s7 = cluster_parallel_duplicates(s6, parallel_merge)
+    s7 = grid_snap_endpoints(s7, grid_snap)
+    s7 = force_l_corner_closure(s7, grid_snap)
+    s7 = grid_snap_endpoints(s7, grid_snap)
+    s7 = manhattan_ultimate_merge(s7)
+
+    # --- ULTIMATE GAP CLOSING (degree-1 carpet bombing) -----------------
+    # (1) (degree map computed inside each pass)
+    # (2) Force-close pairs of free L-corners within 30 px to exact intersection.
+    s8 = force_close_free_l_corners(s7, gap_close)
+    # (3) T-snap with trunk auto-extension: a loose endpoint that projects
+    #     past a trunk's body within tol triggers an extension of the trunk.
+    #     The masks gate prevents extending through white space.
+    s8 = t_snap_with_extension(s8, gap_close, masks=masks)
+    # Re-run free-L closure on whatever the T-extension exposed, then merge.
+    s8 = force_close_free_l_corners(s8, gap_close)
+    s8 = manhattan_ultimate_merge(s8)
+    # (4) Polish: drop pure same-type tails shorter than 10 px that survived.
+    s8 = final_polish_short_tails(s8, gap_final)
+    s8 = manhattan_ultimate_merge(s8)
+
+    snapped = s8
+
+    # --- BRUTE-FORCE RAY EXTENSION (final-final closure, IN PLACE) ------
+    # Operates directly on the same dict objects that get serialized to JSON.
+    # No copies, no graph indirection — every mutation lands in the output.
+    brute_force_ray_extend(snapped, ray_ext, RAY_EXT_LOOSE_PX)
+    # Defensive filter: ray extension may have collapsed a short segment to
+    # a single point (both endpoints coincide). These zero-length segments
+    # corrupt the loose-endpoint detection downstream because they
+    # contribute two endpoints at the same coordinate, falsely raising the
+    # degree of that point.
+    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # Trunk extension: a loose endpoint near an orthogonal trunk's line
+    # but past its body extends the trunk to reach the joint.  The masks
+    # gate keeps the extension from sweeping through white space.
+    extend_trunk_to_loose(snapped, trunk_perp, trunk_gap,
+                          masks=masks)
+    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # Mask-gated asymmetric L-extend: closes corners where one leg's gap is
+    # much larger than the other (the extend_to_intersect pass refused them
+    # because both gaps must fit a single tolerance). The mask gate keeps it
+    # from inventing walls across white space.
+    snapped = mask_gated_l_extend(snapped, max_gap=l_ext_asym, masks=masks)
+    # Insert missing connectors: pairs of loose endpoints that share an x
+    # (or y) but were never linked by a real segment get a synthetic wall
+    # bridging them, closing the L into a watertight rectangle. Gated on
+    # the wall mask so phantom walls across open doorways aren't created.
+    insert_missing_connectors(snapped, colinear_loose,
+                              connector_max,
+                              wall_mask=masks.get("wall"))
+    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # Final 2-px endpoint fusion: snap any near-coincident endpoints to one
+    # canonical (wall-priority) coordinate so micro-deltas vanish.
+    fuse_close_endpoints(snapped, ray_fuse)
+    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # One last collinear merge in case ray extension produced overlapping
+    # spans that can now coalesce.
+    snapped = manhattan_ultimate_merge(snapped)
+
+    from collections import Counter
+    nodes: Counter = Counter()
+    for s in snapped:
+        nodes[(s["x1"], s["y1"])] += 1
+        nodes[(s["x2"], s["y2"])] += 1
+    deg_hist = Counter(nodes.values())
+    n_diag = sum(1 for s in snapped if _classify_axis(s) == "d")
+
+    if verbose:
+        _log("=== summary ===")
+        for label, (npix, nbranch, nseg) in branch_stats.items():
+            _log(f"  {label:7s}  skeleton_px={npix:6d}  branches={nbranch:4d}  raw_segs={nseg:4d}")
+        _log(f"  raw segments        : {len(typed_segments)}")
+        _log(f"  after orthogonalize : {len(s1)}")
+        _log(f"  after merge_collin  : {len(s2)}")
+        _log(f"  after T/L snap+merge: {len(s3)}")
+        _log(f"  after endpoint snap : {len(s4)}")
+        _log(f"  after tail prune    : {len(s5)}")
+        _log(f"  after manhattan     : {len(s6)}")
+        _log(f"  after watertight    : {len(s7)}")
+        _log(f"  after gap-closing   : {len(s8)}")
+        _log(f"  after ray-extension : {len(snapped)}")
+        _log(f"  diagonal seg count  : {n_diag}  (must be 0)")
+        _log(f"  endpoint degree hist: {dict(sorted(deg_hist.items()))}")
+        _log(f"  free endpoints (d=1): {deg_hist.get(1, 0)}  (lower = more watertight)")
+
+    return {
+        "lines": snapped,
+        "image_size": {"width": int(w), "height": int(h)},
+        "stats": {
+            "scale": scale,
+            "segment_count": len(snapped),
+            "diagonal_count": n_diag,
+            "free_endpoints": deg_hist.get(1, 0),
+            "endpoint_degree_histogram": dict(sorted(deg_hist.items())),
+        },
+    }
+
+
 def run_one(src_path: str) -> None:
+    """CLI wrapper: read image from disk, vectorize, write JSON + preview PNG."""
     os.makedirs(OUT_DIR, exist_ok=True)
     stem = os.path.splitext(os.path.basename(src_path))[0]
     out_json = os.path.join(OUT_DIR, f"{stem}.json")
@@ -2319,152 +2682,13 @@ def run_one(src_path: str) -> None:
     if bgr is None:
         raise SystemExit(f"Failed to read source image: {src_path}")
 
-    h, w = bgr.shape[:2]
-    print(f"Image size: {w} x {h} px", flush=True)
-
-    print("Color segmentation...", flush=True)
-    masks = segment_colors(bgr)
-
-    typed_segments: List[Dict] = []
-    branch_stats = {}
-    for label, mask in masks.items():
-        print(f"  Skeletonize ({label})...", flush=True)
-        skel = skeletonize_mask(mask)
-        branches = extract_branches(skel)
-        segs = branches_to_segments(branches)
-        branch_stats[label] = (int(skel.sum()), len(branches), len(segs))
-        for x1, y1, x2, y2 in segs:
-            typed_segments.append({"type": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
-
-    print("Geometric optimization (may take a while on large images)...", flush=True)
-    # --- Geometric optimization pipeline --------------------------------
-    # (1) Force orthogonality (segments within ±5° of an axis become exactly H/V).
-    s1 = axis_align_segments(typed_segments, AXIS_SNAP_DEG)
-    # Tight wall-anchored coordinate cluster so colinear walls share an x or y,
-    # without dragging genuinely-distinct walls together.
-    s1 = snap_colinear_coords(s1, COLINEAR_TOL_PX)
-
-    # (2) Merge collinear same-type segments into a single longest span.
-    s2 = merge_collinear(s1, MERGE_PERP_TOL_PX, MERGE_GAP_TOL_PX)
-
-    # (3a) T-junction node-to-edge snap: chromatic endpoints onto wall bodies,
-    #      same-type endpoints onto own bodies. Walls never snap to chromatic.
-    s3 = t_junction_snap(s2, T_SNAP_TOL_PX)
-    # (3b) L-corner extend-to-intersect: nearest endpoints of a perpendicular
-    #      pair are pulled to their exact intersection — extending if short,
-    #      truncating if they overshoot.
-    s3 = extend_to_intersect(s3, L_EXTEND_TOL_PX)
-    # (3c) Truncate any remaining overshoots: an endpoint sitting on the far
-    #      side of a perpendicular wall by less than tol gets clipped back.
-    s3 = truncate_overshoots(s3, L_EXTEND_TOL_PX)
-    # Re-merge after snapping; some segments may now align colinearly.
-    s3 = merge_collinear(s3, MERGE_PERP_TOL_PX, MERGE_GAP_TOL_PX)
-
-    # Wall-priority NetworkX node merge.
-    s4 = snap_endpoints(s3, SNAP_TOLERANCE_PX)
-
-    # (4) Prune dangling tails — strict definition that protects cross-type
-    #     connections (door/window jambs are never deleted).
-    s5 = prune_tails(s4, TAIL_PRUNE_LEN_PX)
-    s5 = snap_endpoints(s5, SNAP_TOLERANCE_PX)
-
-    # --- STRICT MANHATTAN ROUTING (zero diagonals) ----------------------
-    # (a) Force every segment to be exactly horizontal or exactly vertical.
-    s6 = manhattan_force_axis(s5)
-    # (b) Intersection-based L-corner snap (run twice to catch cascading).
-    s6 = manhattan_intersection_snap(s6, MANHATTAN_SNAP_TOL_PX)
-    s6 = manhattan_intersection_snap(s6, MANHATTAN_SNAP_TOL_PX)
-    # (c) T-junction projection onto orthogonal trunks.
-    s6 = manhattan_t_project(s6, MANHATTAN_SNAP_TOL_PX)
-    # (d) Ultimate collinear merge.
-    s6 = manhattan_ultimate_merge(s6)
-
-    # --- WATERTIGHT CLOSURE (kill duplicates + close gaps) --------------
-    s7 = cluster_parallel_duplicates(s6, PARALLEL_MERGE_TOL_PX)
-    s7 = grid_snap_endpoints(s7, GRID_SNAP_TOL_PX)
-    s7 = force_l_corner_closure(s7, GRID_SNAP_TOL_PX)
-    s7 = grid_snap_endpoints(s7, GRID_SNAP_TOL_PX)
-    s7 = manhattan_ultimate_merge(s7)
-
-    # --- ULTIMATE GAP CLOSING (degree-1 carpet bombing) -----------------
-    # (1) (degree map computed inside each pass)
-    # (2) Force-close pairs of free L-corners within 30 px to exact intersection.
-    s8 = force_close_free_l_corners(s7, GAP_CLOSE_TOL_PX)
-    # (3) T-snap with trunk auto-extension: a loose endpoint that projects
-    #     past a trunk's body within tol triggers an extension of the trunk.
-    #     The masks gate prevents extending through white space.
-    s8 = t_snap_with_extension(s8, GAP_CLOSE_TOL_PX, masks=masks)
-    # Re-run free-L closure on whatever the T-extension exposed, then merge.
-    s8 = force_close_free_l_corners(s8, GAP_CLOSE_TOL_PX)
-    s8 = manhattan_ultimate_merge(s8)
-    # (4) Polish: drop pure same-type tails shorter than 10 px that survived.
-    s8 = final_polish_short_tails(s8, GAP_FINAL_PRUNE_PX)
-    s8 = manhattan_ultimate_merge(s8)
-
-    snapped = s8
-
-    # --- BRUTE-FORCE RAY EXTENSION (final-final closure, IN PLACE) ------
-    # Operates directly on the same dict objects that get serialized to JSON.
-    # No copies, no graph indirection — every mutation lands in the output.
-    brute_force_ray_extend(snapped, RAY_EXT_TOL_PX, RAY_EXT_LOOSE_PX)
-    # Defensive filter: ray extension may have collapsed a short segment to
-    # a single point (both endpoints coincide). These zero-length segments
-    # corrupt the loose-endpoint detection downstream because they
-    # contribute two endpoints at the same coordinate, falsely raising the
-    # degree of that point.
-    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # Trunk extension: a loose endpoint near an orthogonal trunk's line
-    # but past its body extends the trunk to reach the joint.  The masks
-    # gate keeps the extension from sweeping through white space.
-    extend_trunk_to_loose(snapped, TRUNK_EXTEND_PERP_PX, TRUNK_EXTEND_GAP_PX,
-                          masks=masks)
-    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # Insert missing connectors: pairs of loose endpoints that share an x
-    # (or y) but were never linked by a real segment get a synthetic wall
-    # bridging them, closing the L into a watertight rectangle. Gated on
-    # the wall mask so phantom walls across open doorways aren't created.
-    insert_missing_connectors(snapped, COLINEAR_LOOSE_TOL_PX,
-                              CONNECTOR_MAX_LEN_PX,
-                              wall_mask=masks.get("wall"))
-    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # Final 2-px endpoint fusion: snap any near-coincident endpoints to one
-    # canonical (wall-priority) coordinate so micro-deltas vanish.
-    fuse_close_endpoints(snapped, RAY_EXT_FUSE_PX)
-    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # One last collinear merge in case ray extension produced overlapping
-    # spans that can now coalesce.
-    snapped = manhattan_ultimate_merge(snapped)
+    result = vectorize_bgr(bgr, verbose=True)
+    snapped = result["lines"]
 
     print("Writing output...", flush=True)
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump({"lines": snapped}, f, ensure_ascii=False, indent=2)
-
     draw_debug_image(snapped, bgr.shape, out_debug)
-
-    print("=== summary ===", flush=True)
-    for label, (npix, nbranch, nseg) in branch_stats.items():
-        print(f"  {label:7s}  skeleton_px={npix:6d}  branches={nbranch:4d}  raw_segs={nseg:4d}", flush=True)
-    print(f"  raw segments        : {len(typed_segments)}", flush=True)
-    print(f"  after orthogonalize : {len(s1)}", flush=True)
-    print(f"  after merge_collin  : {len(s2)}", flush=True)
-    print(f"  after T/L snap+merge: {len(s3)}", flush=True)
-    print(f"  after endpoint snap : {len(s4)}", flush=True)
-    print(f"  after tail prune    : {len(s5)}", flush=True)
-    print(f"  after manhattan     : {len(s6)}", flush=True)
-    print(f"  after watertight    : {len(s7)}", flush=True)
-    print(f"  after gap-closing   : {len(s8)}", flush=True)
-    print(f"  after ray-extension : {len(snapped)}", flush=True)
-    n_diag = sum(1 for s in snapped if _classify_axis(s) == "d")
-    print(f"  diagonal seg count  : {n_diag}  (must be 0)", flush=True)
-    # Watertightness check: count free endpoints (degree-1 nodes).
-    from collections import Counter
-    nodes = Counter()
-    for s in snapped:
-        nodes[(s["x1"], s["y1"])] += 1
-        nodes[(s["x2"], s["y2"])] += 1
-    deg_hist = Counter(nodes.values())
-    print(f"  endpoint degree hist: {dict(sorted(deg_hist.items()))}", flush=True)
-    print(f"  free endpoints (d=1): {deg_hist.get(1, 0)}  (lower = more watertight)", flush=True)
     print(f"  -> {out_json}", flush=True)
     print(f"  -> {out_debug}", flush=True)
     print("Done.", flush=True)

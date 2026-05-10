@@ -1,0 +1,20 @@
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Test inputs and per-run outputs — not needed in the image.
+srcImg/
+output/
+
+# Editor / OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project notes.
+*.md
+gemini-code-*.md
