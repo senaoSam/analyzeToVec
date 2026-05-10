@@ -1,6 +1,14 @@
-# Test inputs and per-run outputs (large, not needed in repo)
-srcImg/
-output/
+# Test inputs: ignore by default, whitelist the 3 regression images.
+srcImg/*
+!srcImg/source.png
+!srcImg/sg2.png
+!srcImg/Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png
+
+# Per-run outputs: ignore by default, whitelist ablation evidence so the
+# decision record (which 7 passes are no-ops) survives in git history.
+output/*
+!output/ablation_report.csv
+!output/ablation_console.txt
 
 # Legacy single-file outputs at repo root (pre-output/ folder layout)
 debug_preview.png
