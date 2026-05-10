@@ -2,6 +2,13 @@
 srcImg/
 output/
 
+# Legacy single-file outputs at repo root (pre-output/ folder layout)
+debug_preview.png
+output.json
+
+# Project notes / scratch
+gemini-code-*.md
+
 # Python build artefacts
 __pycache__/
 *.pyc
