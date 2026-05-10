@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
@@ -27,9 +28,9 @@ import numpy as np
 from skimage.morphology import skeletonize
 
 
-SRC_PATH = os.path.join(os.path.dirname(__file__), "srcImg", "source.png")
-OUT_JSON = os.path.join(os.path.dirname(__file__), "output.json")
-OUT_DEBUG = os.path.join(os.path.dirname(__file__), "debug_preview.png")
+SRC_DIR = os.path.join(os.path.dirname(__file__), "srcImg")
+OUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+DEFAULT_SRC_NAME = "source.png"
 
 # Snap tolerance for merging near-coincident endpoints across all color layers.
 SNAP_TOLERANCE_PX = 6.0
@@ -2293,16 +2294,41 @@ def draw_debug_image(segments: List[Dict], shape: Tuple[int, int], path: str) ->
 # Driver
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    bgr = cv2.imread(SRC_PATH, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise SystemExit(f"Failed to read source image: {SRC_PATH}")
+def _resolve_src_path(name: str) -> str:
+    if os.path.isabs(name) and os.path.exists(name):
+        return name
+    candidate = os.path.join(SRC_DIR, name)
+    if os.path.exists(candidate):
+        return candidate
+    if not os.path.splitext(name)[1]:
+        for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            alt = os.path.join(SRC_DIR, name + ext)
+            if os.path.exists(alt):
+                return alt
+    return candidate
 
+
+def run_one(src_path: str) -> None:
+    os.makedirs(OUT_DIR, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(src_path))[0]
+    out_json = os.path.join(OUT_DIR, f"{stem}.json")
+    out_debug = os.path.join(OUT_DIR, f"{stem}_preview.png")
+
+    print(f"Loading: {src_path}", flush=True)
+    bgr = cv2.imread(src_path, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise SystemExit(f"Failed to read source image: {src_path}")
+
+    h, w = bgr.shape[:2]
+    print(f"Image size: {w} x {h} px", flush=True)
+
+    print("Color segmentation...", flush=True)
     masks = segment_colors(bgr)
 
     typed_segments: List[Dict] = []
     branch_stats = {}
     for label, mask in masks.items():
+        print(f"  Skeletonize ({label})...", flush=True)
         skel = skeletonize_mask(mask)
         branches = extract_branches(skel)
         segs = branches_to_segments(branches)
@@ -2310,6 +2336,7 @@ def main() -> None:
         for x1, y1, x2, y2 in segs:
             typed_segments.append({"type": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
 
+    print("Geometric optimization (may take a while on large images)...", flush=True)
     # --- Geometric optimization pipeline --------------------------------
     # (1) Force orthogonality (segments within ±5° of an axis become exactly H/V).
     s1 = axis_align_segments(typed_segments, AXIS_SNAP_DEG)
@@ -2408,26 +2435,27 @@ def main() -> None:
     # spans that can now coalesce.
     snapped = manhattan_ultimate_merge(snapped)
 
-    with open(OUT_JSON, "w", encoding="utf-8") as f:
+    print("Writing output...", flush=True)
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump({"lines": snapped}, f, ensure_ascii=False, indent=2)
 
-    draw_debug_image(snapped, bgr.shape, OUT_DEBUG)
+    draw_debug_image(snapped, bgr.shape, out_debug)
 
-    print("=== summary ===")
+    print("=== summary ===", flush=True)
     for label, (npix, nbranch, nseg) in branch_stats.items():
-        print(f"  {label:7s}  skeleton_px={npix:6d}  branches={nbranch:4d}  raw_segs={nseg:4d}")
-    print(f"  raw segments        : {len(typed_segments)}")
-    print(f"  after orthogonalize : {len(s1)}")
-    print(f"  after merge_collin  : {len(s2)}")
-    print(f"  after T/L snap+merge: {len(s3)}")
-    print(f"  after endpoint snap : {len(s4)}")
-    print(f"  after tail prune    : {len(s5)}")
-    print(f"  after manhattan     : {len(s6)}")
-    print(f"  after watertight    : {len(s7)}")
-    print(f"  after gap-closing   : {len(s8)}")
-    print(f"  after ray-extension : {len(snapped)}")
+        print(f"  {label:7s}  skeleton_px={npix:6d}  branches={nbranch:4d}  raw_segs={nseg:4d}", flush=True)
+    print(f"  raw segments        : {len(typed_segments)}", flush=True)
+    print(f"  after orthogonalize : {len(s1)}", flush=True)
+    print(f"  after merge_collin  : {len(s2)}", flush=True)
+    print(f"  after T/L snap+merge: {len(s3)}", flush=True)
+    print(f"  after endpoint snap : {len(s4)}", flush=True)
+    print(f"  after tail prune    : {len(s5)}", flush=True)
+    print(f"  after manhattan     : {len(s6)}", flush=True)
+    print(f"  after watertight    : {len(s7)}", flush=True)
+    print(f"  after gap-closing   : {len(s8)}", flush=True)
+    print(f"  after ray-extension : {len(snapped)}", flush=True)
     n_diag = sum(1 for s in snapped if _classify_axis(s) == "d")
-    print(f"  diagonal seg count  : {n_diag}  (must be 0)")
+    print(f"  diagonal seg count  : {n_diag}  (must be 0)", flush=True)
     # Watertightness check: count free endpoints (degree-1 nodes).
     from collections import Counter
     nodes = Counter()
@@ -2435,10 +2463,21 @@ def main() -> None:
         nodes[(s["x1"], s["y1"])] += 1
         nodes[(s["x2"], s["y2"])] += 1
     deg_hist = Counter(nodes.values())
-    print(f"  endpoint degree hist: {dict(sorted(deg_hist.items()))}")
-    print(f"  free endpoints (d=1): {deg_hist.get(1, 0)}  (lower = more watertight)")
-    print(f"  -> {OUT_JSON}")
-    print(f"  -> {OUT_DEBUG}")
+    print(f"  endpoint degree hist: {dict(sorted(deg_hist.items()))}", flush=True)
+    print(f"  free endpoints (d=1): {deg_hist.get(1, 0)}  (lower = more watertight)", flush=True)
+    print(f"  -> {out_json}", flush=True)
+    print(f"  -> {out_debug}", flush=True)
+    print("Done.", flush=True)
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if not args:
+        args = [DEFAULT_SRC_NAME]
+    for name in args:
+        src_path = _resolve_src_path(name)
+        print(f"\n========== {name} ==========", flush=True)
+        run_one(src_path)
 
 
 if __name__ == "__main__":
