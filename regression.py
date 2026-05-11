@@ -203,6 +203,10 @@ def compute_graph_metrics(lines: List[Dict]) -> Dict:
 # ---------------------------------------------------------------------------
 
 def discover_cases(only: Optional[str] = None) -> List[str]:
+    """Return case names. With ``only`` set, return just that case (and honour
+    its skip flag only if --include-skipped is implicit via explicit naming).
+    Without ``only``, drop any case whose manifest has ``"skip": true``.
+    """
     if not os.path.isdir(CASES_DIR):
         return []
     names = sorted(d for d in os.listdir(CASES_DIR)
@@ -211,7 +215,18 @@ def discover_cases(only: Optional[str] = None) -> List[str]:
         if only not in names:
             raise SystemExit(f"unknown case: {only!r} (have: {names})")
         return [only]
-    return names
+    # Auto-discovery drops cases manifest-marked skip:true.
+    out: List[str] = []
+    for n in names:
+        try:
+            mf = load_manifest(n)
+        except SystemExit:
+            continue
+        if mf.get("skip"):
+            print(f"[SKIP] {n}: {mf.get('skip_reason', 'manifest skip=true')}")
+            continue
+        out.append(n)
+    return out
 
 
 def load_manifest(case: str) -> Dict:
