@@ -19,7 +19,8 @@
 | 4.6 | macro-candidate | ⚠️ 改成 predictive | 原計畫：寫 `extend_then_snap` 等 macro。實作後發現 macro 的 remove+add 跟 `apply_candidate` 的 batch-accept 衝突（index shift），改用 score 加 `pseudo_junction` term（loose endpoint 在 wall body interior 算半個 junction）達成同樣效果。**沒寫 macro candidate** |
 | 4.7 | （todo 沒列）proximal_bridge_generator + junction-aware merge | ✅ 完成 | [generators.py](generators.py) — 對任意 wall endpoint pair 提案 axis-bridge / L-bridge；`manhattan_ultimate_merge` 加 junction-aware（不再吃掉 T-junction）。free endpoint 在 source 24→11、sg2 44→22 |
 | 4.8 | （todo 沒列）pass 折疊 + dead code 清理 | ✅ 完成 | 砍掉 8 個重複/NO-OP call（mask_gated_l_extend, manhattan_merge ×3, extend_to_intersect, extend_trunk_to_loose, force_close_free_l_corners, prune_tails）；刪 11 個 dead-code 函式（1339 行）；ablation.py 重新 sync |
-| 5 | scoring + ranking model | ❌ 未開始 | 需要 30-50 張人工標註的 floorplan 才能訓練；跨 session 工作 |
+| **4.9** | **canonical line clustering + local_thickness**（新增，**user 觀察後加的**）| ❌ **未開始**——應在 step 5 之前做 | 解「1-3px 平行偏移」根因：目前 `snap_colinear_coords` (2.5px) 太緊、`cluster_parallel_duplicates` 要求 body overlap，兩者都不會把「分離的、3px 漂移的近平行牆」合一。需新模組 `canonical_line.py`（orientation bucket → offset cluster → median projection），加 per-segment `local_thickness`（從 distance transform），讓 snap_tol 變 thickness-aware。**詳見下方 step 4.9 章節** |
+| 5 | scoring + ranking model | ❌ 未開始 | 需要 30-50 張人工標註的 floorplan 才能訓練；跨 session 工作。建議先做 4.9 再進 5（標註才有穩定 canonical-line reference） |
 
 **Pipeline call site 變化**：31（起始估算）→ **17**（−45%）
 
@@ -38,14 +39,15 @@
 - `feedback_baseline_update_protocol.md` — baseline 更新前必須先給用戶看 overlay 並明確徵詢，不要用 `--yes` 自動更新
 - `project_step2_baseline_shift.md` — step 2 漂移歷史記錄（step 2 後來被 revert，這份 memory 部分過時）
 
-**接下來什麼最該做**：
+**接下來什麼最該做**（user 2026-05-11 review 後更新的優先順序）：
 
-| 選項 | 評估 |
-|---|---|
-| **step 5** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註，不是寫程式 |
-| collapse_collinear_walls_generator | 再 −1 call site；純架構；非緊迫，建議 step 5 後再評估 |
-| 把 `door_window_to_segments` 從 git history 拿回來重做 step 2 | 不建議（skeleton path 已驗證對 source/sg2 topology 是對的） |
-| Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定 |
+| 順序 | 選項 | 評估 |
+|---|---|---|
+| **1（下次 session 第一件事）** | **step 4.9 — canonical line clustering + local_thickness** | 解「1-3px 平行偏移、T 接不上、粗細牆混合」這組 active bug；4-7h 估時；ranker 救不到（detail 見下方 4.9 章節） |
+| 2 | **step 5 — ranking model + 標註集** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註。應在 4.9 後做（canonical line 穩定後再標註才有 ground truth）|
+| 後 | collapse_collinear_walls_generator | 再 −1 call site；純架構；非緊迫，可能在 4.9 之後變多餘 |
+| 後 | 把 `door_window_to_segments` 從 git history 拿回重試 step 2 | 不建議（skeleton path 已驗證對 source/sg2 topology 是對的）|
+| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定。可能在 4.9 後輸出更乾淨再 un-skip |
 
 **容易踩的雷（從這次經驗加上的）**：
 - `apply_candidate` 的 remove+add 跟 batch accept loop 有 index-shift 衝突——這是 macro candidate 不能直接做的根因。要做的話需要 single-accept-then-regenerate 模式
@@ -333,9 +335,103 @@
 
 ---
 
+## 第 4.9 步：canonical line clustering + local_thickness（新增）
+
+**加入時間**：2026-05-11 收工 review 後。是現場觀察出來的、不在原 todo 上的真實 active bug。
+
+**為什麼需要**：
+
+目前 pipeline 在 score / candidate / gates 那層做得不錯，但**底層幾何正規化還是 1-3px 平行偏移的世界**。具體：
+
+- `snap_colinear_coords` (tol=2.5px) 太緊 — 3px 漂移的 walls 不會合
+- `cluster_parallel_duplicates` (perp_tol≈13px) 夠寬 — 但**要求 body overlap**，分離的兩段不會合
+- `snap_endpoints` 是 endpoint-to-endpoint cluster — 不是「endpoint snap to canonical line」，容易把 T 接位置吸偏
+
+**症狀**：
+- sg2 baseline 同時存在 wall at y=541.3 和 y=559.5（同一面牆被切兩段，斜接歪掉）
+- 紅圈處 L-bridge 案：兩個 degree-2 corner 跟同一個 canonical line 應有的關係，被當作獨立角處理
+- 粗細牆混合時 skeleton 抓到的中線常被 junction / 開口拉歪 1-3 px
+
+**ranker 救不到這個**：
+ranker 評估 candidate 接受機率，但 canonical-line-projection 是「改 segment 本體座標」、不是「決定接受 candidate」。如果上游 segment 的 y 是 100.3 而不是 100，下游所有 candidate / score / output 都帶這 0.3px 漂移。**先正規化幾何，再 candidate-rank**。
+
+### 4.9.1 orientation quantization（已有）
+- ✅ `axis_align_segments`（5° 容忍）+ `manhattan_force_axis`
+
+### 4.9.2 offset clustering + canonical line fitting + projection（新建）
+
+**新模組** `canonical_line.py`：
+
+```
+for each orientation (h / v):
+    for each segment:
+        offset = y (for h) or x (for v)
+    cluster offsets by perpendicular distance ≤ adaptive_tol
+        adaptive_tol = clamp(0.25 * median_local_thickness, 2px, 6px)
+    for each cluster:
+        canonical_offset = median(offsets) weighted by length
+        project every member segment: rewrite their y (or x) to canonical_offset
+```
+
+**正確順序**：
+1. orientation quantization（已有）
+2. **offset clustering + canonical fit + projection**（新）
+3. collinear merge（已有）
+4. T/L snap（line-to-line，不是 endpoint-to-endpoint）
+5. gap closing with strict constraints
+6. topology cleanup
+
+**錯誤順序**（目前的）：先補全 / snap / merge 再 cluster — 補錯的偏移會越補越歪。
+
+### 4.9.3 local_thickness 屬性
+- [ ] segment 新增 `local_thickness` 欄位
+- [ ] 計算：在 segment 中點 sample wall mask 的 distance transform，取 `2 × distance_to_background`
+- [ ] 對整條 segment 取 median thickness（防 junction 拉低）
+
+### 4.9.4 thickness-aware snap_tol
+- [ ] 把全域 `snap_tol = SNAP_TOLERANCE_PX * scale` 改成 per-segment `snap_tol = clamp(0.25 * local_thickness, 2px, 6px)`
+- [ ] 影響 `manhattan_t_project`、`manhattan_intersection_snap`、`fuse_close_endpoints`
+- [ ] 預期：粗牆容忍度大、細牆嚴格、不會亂吸
+
+### 4.9.5 T/L snap 改 line-to-line（不是 endpoint-to-endpoint）
+
+T-junction（已有 `manhattan_t_project` 部分做）：
+- vertical endpoint (x, y) 接近 horizontal canonical line (y_canonical, x_span)
+- if abs(y - y_canonical) ≤ snap_tol AND x ∈ x_span
+- → endpoint 改成 (x, y_canonical)
+
+L-junction（已有 `manhattan_intersection_snap` 部分做）：
+- horizontal canonical y, vertical canonical x
+- intersection = (x_v, y_h)
+- 兩 endpoint 都拉到 intersection
+
+`snap_endpoints` 的 endpoint-to-endpoint cluster 在 canonical line 出現後**應該變 NO-OP**（如果還沒，表示 canonical line 沒蓋全）
+
+### 4.9.6 gap closing 嚴格化
+- [ ] 條件：same orientation AND same canonical offset AND gap ≤ max_gap AND stroke_width compatible AND 不穿過 door/window opening
+- [ ] 目前 `proximal_bridge_generator` 大部分有，差 stroke_width compatibility check
+
+### 4.9.7 驗收
+- [ ] 跑 regression：source / sg2 視覺檢查 + free_endpoint 應再下降
+- [ ] sg2 不再有 y=541.3 + y=559.5 共存（會合到 canonical）
+- [ ] 跑 ablation 看新模組對其他 pass 的影響（很多舊 pass 可能變 NO-OP → 又一輪 call site 削減）
+- [ ] commit + 視覺確認 + 問用戶 baseline 是否更新
+
+### 4.9.8 預期結果
+- 1-3px 平行偏移消失
+- T/L junction 更穩
+- 粗細牆混合的 snap tolerance 自動調整
+- 可能再砍 2-3 個 call site（snap_endpoints、snap_colinear_coords 都可能變多餘）
+- step 5 標註會有穩定 canonical-line reference
+
+**估時**：4-7 小時
+**風險**：中——影響底層幾何，預期 baseline 需要更新（要先給用戶看 overlay 才更新）
+
+---
+
 ## 第五步：scoring + ranking model（最後做）
 
-前 4 步穩定後再進。
+前 4 步（含 4.9）穩定後再進。
 
 ### 5.1 標註集
 - [ ] **不從白紙標註**：用現有 pipeline output 當基底，人工只標 baseline 哪裡錯
