@@ -27,6 +27,8 @@ import networkx as nx
 import numpy as np
 from skimage.morphology import skeletonize
 
+from canonical_line import canonicalize_offsets
+
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "srcImg")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -2528,6 +2530,17 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # --- STRICT MANHATTAN ROUTING (zero diagonals) ----------------------
     # (a) Force every segment to be exactly horizontal or exactly vertical.
     s6 = manhattan_force_axis(s5)
+    # (a.5) Step 4.9: canonicalise parallel offsets. Per (type, axis)
+    #       bucket, cluster segment offsets within an adaptive
+    #       thickness-aware tolerance (2-6 px) and pull each member's
+    #       perp coordinate to the cluster's length-weighted mean. Unlike
+    #       ``cluster_parallel_duplicates`` downstream, this does not
+    #       require body overlap — its purpose is to collapse the 1-3 px
+    #       y / x drift that skeletonisation introduces between collinear
+    #       pieces of one wall. Running it before T / L snap means those
+    #       passes see a single canonical line per logical wall, instead
+    #       of N nominally-distinct lines all within 3 px of each other.
+    s6 = canonicalize_offsets(s6, wall_mask=masks.get("wall"))
     # (b) Intersection-based L-corner snap.
     s6 = manhattan_intersection_snap(s6, manhattan_tol)
     # (c) T-junction projection onto orthogonal trunks.

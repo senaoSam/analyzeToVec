@@ -19,35 +19,36 @@
 | 4.6 | macro-candidate | ⚠️ 改成 predictive | 原計畫：寫 `extend_then_snap` 等 macro。實作後發現 macro 的 remove+add 跟 `apply_candidate` 的 batch-accept 衝突（index shift），改用 score 加 `pseudo_junction` term（loose endpoint 在 wall body interior 算半個 junction）達成同樣效果。**沒寫 macro candidate** |
 | 4.7 | （todo 沒列）proximal_bridge_generator + junction-aware merge | ✅ 完成 | [generators.py](generators.py) — 對任意 wall endpoint pair 提案 axis-bridge / L-bridge；`manhattan_ultimate_merge` 加 junction-aware（不再吃掉 T-junction）。free endpoint 在 source 24→11、sg2 44→22 |
 | 4.8 | （todo 沒列）pass 折疊 + dead code 清理 | ✅ 完成 | 砍掉 8 個重複/NO-OP call（mask_gated_l_extend, manhattan_merge ×3, extend_to_intersect, extend_trunk_to_loose, force_close_free_l_corners, prune_tails）；刪 11 個 dead-code 函式（1339 行）；ablation.py 重新 sync |
-| **4.9** | **canonical line clustering + local_thickness**（新增，**user 觀察後加的**）| ❌ **未開始**——應在 step 5 之前做 | 解「1-3px 平行偏移」根因：目前 `snap_colinear_coords` (2.5px) 太緊、`cluster_parallel_duplicates` 要求 body overlap，兩者都不會把「分離的、3px 漂移的近平行牆」合一。需新模組 `canonical_line.py`（orientation bucket → offset cluster → median projection），加 per-segment `local_thickness`（從 distance transform），讓 snap_tol 變 thickness-aware。**詳見下方 step 4.9 章節** |
+| **4.9** | **canonical line clustering + local_thickness** | ⚠️ **4.9.2 部分完成**（4.9.3-4.9.6 未做）| [canonical_line.py](canonical_line.py) — `canonicalize_offsets()` per (type, axis) bucket、length-weighted median、adaptive tol `clamp(0.25 × median_local_thickness, 2, 6)`。插在 `manhattan_force_axis` 之後 / `manhattan_intersection_snap` 之前。源 bit-identical PASS；sg2 在右側兩個 V 牆 sub-pixel re-centering + 消掉 1 個 duplicate（segs 129→128），baseline 已更新（user-approved 視覺確認）。**仍待做**：4.9.3 (`local_thickness` 持久化欄位)、4.9.4 (thickness-aware snap_tol)、4.9.6 (gap closing stroke_width compatibility) |
 | 5 | scoring + ranking model | ❌ 未開始 | 需要 30-50 張人工標註的 floorplan 才能訓練；跨 session 工作。建議先做 4.9 再進 5（標註才有穩定 canonical-line reference） |
 
 **Pipeline call site 變化**：31（起始估算）→ **17**（−45%）
 
 **Regression 狀態（收工）**：
 - source: PASS bit-identical
-- sg2: PASS bit-identical（前後共更新 baseline 5 次：step 2, step 3, step 4.5a, step 4.5e, step 4.6, step 4.7, step 4.8。最近一次 user-approved option A，threshold 不放寬）
+- sg2: PASS（最近一次 step 4.9.2 baseline 更新 — user-approved 視覺確認後同意，理由：sub-pixel re-centering + 消除 1 個 duplicate segment；free endpoint 從 22→23 是 duplicate 消除後曝光的 loose end，非新增結構錯誤）
 - Gemini_Generated: **skip=true**（manifest 設定）。step 4.7-4.8 之後輸出跟 step 2 era baseline 大幅漂移（free 54→35 改善了、但 wall IOU 0.69 表示位置漂得多），未做視覺確認 + baseline update
 
 **新模組**（todo 沒列、實際產生）：
 - [scoring.py](scoring.py) — score 函數
 - [candidates.py](candidates.py) — `Candidate` / `SpatialGate` / 三個 gates
 - [generators.py](generators.py) — `proximal_bridge_candidates`（axis-bridge + L-bridge + safe-mutate）
+- [canonical_line.py](canonical_line.py) — `canonicalize_offsets` + `compute_local_thickness`（step 4.9.2）
 
 **Memory（給未來 session）**：
 - `feedback_no_git_push.md` — user 嚴禁 push，不要嘗試
 - `feedback_baseline_update_protocol.md` — baseline 更新前必須先給用戶看 overlay 並明確徵詢，不要用 `--yes` 自動更新
 - `project_step2_baseline_shift.md` — step 2 漂移歷史記錄（step 2 後來被 revert，這份 memory 部分過時）
 
-**接下來什麼最該做**（user 2026-05-11 review 後更新的優先順序）：
+**接下來什麼最該做**（更新於 step 4.9.2 完成後）：
 
 | 順序 | 選項 | 評估 |
 |---|---|---|
-| **1（下次 session 第一件事）** | **step 4.9 — canonical line clustering + local_thickness** | 解「1-3px 平行偏移、T 接不上、粗細牆混合」這組 active bug；4-7h 估時；ranker 救不到（detail 見下方 4.9 章節） |
-| 2 | **step 5 — ranking model + 標註集** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註。應在 4.9 後做（canonical line 穩定後再標註才有 ground truth）|
-| 後 | collapse_collinear_walls_generator | 再 −1 call site；純架構；非緊迫，可能在 4.9 之後變多餘 |
+| **1** | **step 4.9.3-4.9.6** — 補完 canonical_line 配套 | `local_thickness` 持久化欄位、thickness-aware snap_tol（`manhattan_t_project` / `manhattan_intersection_snap` / `fuse_close_endpoints`）、gap closing stroke_width compatibility。預估 2-3h |
+| 2 | **step 5 — ranking model + 標註集** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註。canonical_line 已穩定，可開始標註 |
+| 後 | collapse_collinear_walls_generator | 再 −1 call site；純架構；非緊迫 |
 | 後 | 把 `door_window_to_segments` 從 git history 拿回重試 step 2 | 不建議（skeleton path 已驗證對 source/sg2 topology 是對的）|
-| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定。可能在 4.9 後輸出更乾淨再 un-skip |
+| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定 |
 
 **容易踩的雷（從這次經驗加上的）**：
 - `apply_candidate` 的 remove+add 跟 batch accept loop 有 index-shift 衝突——這是 macro candidate 不能直接做的根因。要做的話需要 single-accept-then-regenerate 模式
