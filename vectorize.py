@@ -29,6 +29,11 @@ from skimage.morphology import skeletonize
 
 from canonical_line import canonicalize_offsets
 
+# Segment fields that are pipeline-internal — computed and used inside
+# vectorize_bgr but stripped before the result leaves this module. Keeps
+# the public JSON contract limited to ``{type, x1, y1, x2, y2}``.
+_INTERNAL_SEG_FIELDS = ("local_thickness",)
+
 
 SRC_DIR = os.path.join(os.path.dirname(__file__), "srcImg")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -2540,7 +2545,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #       pieces of one wall. Running it before T / L snap means those
     #       passes see a single canonical line per logical wall, instead
     #       of N nominally-distinct lines all within 3 px of each other.
-    s6 = canonicalize_offsets(s6, wall_mask=masks.get("wall"))
+    s6 = canonicalize_offsets(s6, wall_mask=masks.get("wall"),
+                              attach_thickness=True)
     # (b) Intersection-based L-corner snap.
     s6 = manhattan_intersection_snap(s6, manhattan_tol)
     # (c) T-junction projection onto orthogonal trunks.
@@ -2639,6 +2645,16 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # One last collinear merge in case ray extension produced overlapping
     # spans that can now coalesce.
     snapped = manhattan_ultimate_merge(snapped)
+
+    # Strip pipeline-internal fields (e.g. ``local_thickness`` from
+    # canonical_line) so the public JSON payload stays canonical
+    # ``{type, x1, y1, x2, y2}``. Most are already dropped by passes that
+    # rebuild dicts from scratch (cluster_parallel_duplicates,
+    # manhattan_ultimate_merge), but anything that survived in-place
+    # mutation gets cleaned up here.
+    for s in snapped:
+        for k in _INTERNAL_SEG_FIELDS:
+            s.pop(k, None)
 
     from collections import Counter
     nodes: Counter = Counter()
