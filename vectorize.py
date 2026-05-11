@@ -3890,15 +3890,26 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     extend_trunk_to_loose(snapped, trunk_perp, trunk_gap,
                           masks=masks)
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # Mask-gated asymmetric L-extend: closes corners where one leg's gap is
-    # much larger than the other (the extend_to_intersect pass refused them
-    # because both gaps must fit a single tolerance). The mask gate keeps it
-    # from inventing walls across white space.
-    snapped = mask_gated_l_extend(snapped, max_gap=l_ext_asym, masks=masks)
+    # mask_gated_l_extend (asymmetric L-corner closure via endpoint
+    # mutation) used to run here. Subsumed by ``proximal_bridge_generator``
+    # below: the bridge generator proposes an *add-L-bridge* candidate for
+    # the same pair of endpoints, and the now junction-aware
+    # ``manhattan_ultimate_merge`` folds the new bridge into the existing
+    # H / V trunks, producing the same rendered pixels as the legacy
+    # mutate. Function body retained as TODO dead code for future
+    # candidate-architecture cross-checks.
     # Insert missing connectors: pairs of loose endpoints that share an x
     # (or y) but were never linked by a real segment get a synthetic wall
     # bridging them, closing the L into a watertight rectangle. Gated on
     # the wall mask so phantom walls across open doorways aren't created.
+    #
+    # Not yet folded into ``proximal_bridge_generator``: the bridge
+    # generator proposes the same axis-bridge but does NOT snap the
+    # existing endpoints onto the bridge axis. Without the snap the
+    # bridge floats next to (rather than connects) the source walls and
+    # score correctly rejects it. Folding requires extending the
+    # generator to emit safe endpoint-mutations (only when the source
+    # segment's free direction permits the snap); deferred.
     insert_missing_connectors(snapped, colinear_loose,
                               connector_max,
                               wall_mask=masks.get("wall"))
