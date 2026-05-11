@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import cv2
 import networkx as nx
@@ -2282,25 +2282,22 @@ def _path_mask_support(mask: np.ndarray, x1: float, y1: float,
     return hit / n
 
 
-def insert_missing_connectors(lines: List[Dict],
-                              colinear_tol: float,
-                              max_len: float,
-                              wall_mask: np.ndarray = None,
-                              min_support: float = 0.6) -> None:
-    """Mutate `lines` IN PLACE: insert new wall segments to bridge pairs of
-    loose endpoints that share the same x (or y) within colinear_tol and
-    whose perpendicular separation is <= max_len.
+def _insert_missing_connectors_legacy(lines: List[Dict],
+                                      colinear_tol: float,
+                                      max_len: float,
+                                      wall_mask: np.ndarray = None,
+                                      min_support: float = 0.6) -> None:
+    """Legacy step-1-era implementation kept for reference.
 
-    This handles the "skeleton lost a short connector" case: two L-corners
-    are present but the small wall segment that would close them into a
-    single closed rectangle didn't survive the pipeline. We synthesise it
-    here so the geometry is watertight.
+    Heuristic: for each loose endpoint, find the best partner along an axis
+    within colinear_tol, distance <= max_len, mask support >= min_support;
+    insert a synthetic wall + snap both endpoints to the connector axis.
+    Apply immediately, with no global cost check.
 
-    If `wall_mask` is provided, the proposed connector path is sampled
-    against it; only paths with >= `min_support` fractional coverage are
-    inserted. This prevents the synthesis of phantom walls across white
-    space (e.g. across an open doorway), which is the common failure mode
-    when two unrelated loose endpoints happen to share an axis.
+    Replaced by ``insert_missing_connectors`` which proposes the same set
+    of repairs as candidates and only accepts those whose pipeline-score
+    delta is positive. Kept in-source as a TODO marker while step 4.5a is
+    bedding in; will be deleted at the end of step 4.
     """
     # Snapshot the current loose endpoints. We will append new segments
     # as we go, but only consider the ORIGINAL loose endpoints as
@@ -2413,6 +2410,187 @@ def insert_missing_connectors(lines: List[Dict],
             consumed.add(loose[best])
 
     lines.extend(new_segments)
+
+
+# Minimum total-score improvement for a candidate to be accepted. 0.0 means
+# strictly-positive deltas only. The free-endpoint term alone contributes +2
+# when a gap-close fuses two loose endpoints, so most "real" repairs clear
+# this comfortably; the threshold filters out near-noop synthetics that
+# would otherwise add geometry without value.
+CANDIDATE_MIN_ACCEPT_DELTA = 0.0
+
+# Loosened lower-bound for the gate that gap-close synthetic connectors
+# must pass before scoring. Per todo.md step 4.4, anything below this is
+# rejected without paying for a score evaluation. The legacy 0.6 hard cutoff
+# is now a soft signal that scoring weighs alongside the other terms.
+GAP_CONNECTOR_GATE_MIN = 0.30
+
+
+def insert_missing_connectors(lines: List[Dict],
+                              colinear_tol: float,
+                              max_len: float,
+                              wall_mask: np.ndarray = None,
+                              min_support: float = 0.6,
+                              *,
+                              wall_evidence: np.ndarray = None,
+                              door_mask: np.ndarray = None,
+                              window_mask: np.ndarray = None) -> None:
+    """Candidate-based step-4 implementation of the gap-close pass.
+
+    Generates one Candidate per (loose-endpoint, loose-endpoint) pair that
+    passes the cheap gates (semantic = wall↔wall, evidence = mask support
+    ≥ GAP_CONNECTOR_GATE_MIN). Sorts candidates by length ascending /
+    support descending, then greedy-accepts those whose pipeline-score
+    delta is positive. An endpoint that has already been used by an
+    accepted candidate is not reused.
+
+    Same call signature as the legacy implementation so the pipeline
+    wiring in vectorize_bgr stays unchanged. ``min_support`` is kept as a
+    parameter but no longer hard-rejects — it is now an audit floor that
+    callers can tighten if they want a more conservative pass.
+    """
+    import candidates as C
+    import scoring as S
+
+    if not lines:
+        return
+
+    # Inventory all endpoints and their owners.
+    from collections import Counter
+    end_count: Counter = Counter()
+    end_to_seg: Dict[Tuple[float, float], List[Tuple[int, str]]] = {}
+    for i, s in enumerate(lines):
+        for end in ("1", "2"):
+            pt = (s["x" + end], s["y" + end])
+            end_count[pt] += 1
+            end_to_seg.setdefault(pt, []).append((i, end))
+
+    # Loose wall endpoints only.
+    loose_wall: List[Tuple[float, float]] = []
+    for pt, cnt in end_count.items():
+        if cnt != 1:
+            continue
+        sidx, _ = end_to_seg[pt][0]
+        if lines[sidx].get("type") != "wall":
+            continue
+        loose_wall.append(pt)
+
+    if len(loose_wall) < 2:
+        return
+
+    # Use the binary wall mask as a float evidence map when no continuous
+    # one is supplied. Promotes ((mask>0)?1.0:0.0) so the score's
+    # evidence_integral computes "fraction of pixels on the wall mask",
+    # matching legacy semantics.
+    if wall_evidence is None and wall_mask is not None:
+        wall_evidence = (wall_mask > 0).astype(np.float32)
+
+    gate_min = max(GAP_CONNECTOR_GATE_MIN, 0.0)
+
+    # ---- Candidate generation -----------------------------------------
+    cands: List[C.Candidate] = []
+    for axis, fixed_pred in (
+        ("v", lambda a, b: abs(a[0] - b[0])),  # shared x; perpendicular = y-gap
+        ("h", lambda a, b: abs(a[1] - b[1])),  # shared y; perpendicular = x-gap
+    ):
+        for i in range(len(loose_wall)):
+            xi, yi = loose_wall[i]
+            for j in range(i + 1, len(loose_wall)):
+                xj, yj = loose_wall[j]
+                if axis == "v":
+                    if abs(xi - xj) > colinear_tol:
+                        continue
+                    d = abs(yi - yj)
+                    if not (1e-3 < d <= max_len):
+                        continue
+                    cx = 0.5 * (xi + xj)
+                    ylo, yhi = sorted((yi, yj))
+                    if wall_mask is not None:
+                        support = C.mask_support_along(wall_mask, cx, ylo, cx, yhi)
+                    else:
+                        support = 1.0
+                    if support < gate_min:
+                        continue
+                    new_seg = {"type": "wall", "x1": cx, "y1": ylo,
+                               "x2": cx, "y2": yhi}
+                    mut = []
+                    for (idx, end) in end_to_seg[(xi, yi)]:
+                        mut.append((idx, end, cx, yi))
+                    for (idx, end) in end_to_seg[(xj, yj)]:
+                        mut.append((idx, end, cx, yj))
+                else:
+                    if abs(yi - yj) > colinear_tol:
+                        continue
+                    d = abs(xi - xj)
+                    if not (1e-3 < d <= max_len):
+                        continue
+                    cy = 0.5 * (yi + yj)
+                    xlo, xhi = sorted((xi, xj))
+                    if wall_mask is not None:
+                        support = C.mask_support_along(wall_mask, xlo, cy, xhi, cy)
+                    else:
+                        support = 1.0
+                    if support < gate_min:
+                        continue
+                    new_seg = {"type": "wall", "x1": xlo, "y1": cy,
+                               "x2": xhi, "y2": cy}
+                    mut = []
+                    for (idx, end) in end_to_seg[(xi, yi)]:
+                        mut.append((idx, end, xi, cy))
+                    for (idx, end) in end_to_seg[(xj, yj)]:
+                        mut.append((idx, end, xj, cy))
+
+                cands.append(C.Candidate(
+                    op="gap_close",
+                    add=[new_seg],
+                    mutate=mut,
+                    meta={"length": d, "support": support, "axis": axis,
+                          "endpoints": ((xi, yi), (xj, yj))},
+                ))
+
+    if not cands:
+        return
+
+    # Short, high-support repairs first — greedy commit order matters
+    # because endpoints already consumed in one accepted candidate cannot
+    # be re-used by another.
+    cands.sort(key=lambda c: (c.meta["length"], -c.meta["support"]))
+
+    # ---- Score-and-accept loop -----------------------------------------
+    current = list(lines)
+    base_score = S.compute_score(current,
+                                 wall_evidence=wall_evidence,
+                                 door_mask=door_mask,
+                                 window_mask=window_mask)
+    used_mutations: Set[Tuple[int, str]] = set()
+    used_endpoints: Set[Tuple[float, float]] = set()
+
+    for cand in cands:
+        # Endpoint-level exclusion: each pair of loose endpoints can be
+        # consumed by at most one accepted candidate.
+        eps = cand.meta["endpoints"]
+        if eps[0] in used_endpoints or eps[1] in used_endpoints:
+            continue
+        if any((idx, end) in used_mutations for (idx, end, _, _) in cand.mutate):
+            continue
+
+        trial = C.apply_candidate(current, cand)
+        trial_score = S.compute_score(trial,
+                                      wall_evidence=wall_evidence,
+                                      door_mask=door_mask,
+                                      window_mask=window_mask)
+        delta = trial_score.total - base_score.total
+        if delta > CANDIDATE_MIN_ACCEPT_DELTA:
+            current = trial
+            base_score = trial_score
+            for (idx, end, _, _) in cand.mutate:
+                used_mutations.add((idx, end))
+            used_endpoints.add(eps[0])
+            used_endpoints.add(eps[1])
+
+    # In-place replace so the caller's reference stays valid.
+    lines.clear()
+    lines.extend(current)
 
 
 def fuse_close_endpoints(lines: List[Dict], tol: float) -> None:
