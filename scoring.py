@@ -57,6 +57,7 @@ DERIVED_COEFFS: Dict[str, float] = {
     "phantom":               -2.0,
     "duplicate":             -0.5,
     "junction":               0.5,
+    "pseudo_junction":        0.5,
     "opening_attachment":     1.0,
     "manhattan_consistency":  0.5,
 }
@@ -311,6 +312,70 @@ def junction_count(segments: Sequence[Dict]) -> int:
     return sum(1 for v in _node_degree_counter(segments).values() if v >= 3)
 
 
+def pseudo_junction_count(segments: Sequence[Dict],
+                          tol: float = 1.0) -> int:
+    """Number of degree-1 endpoints that sit strictly on a *wall* segment's
+    body interior.
+
+    These are *deferred* T-junctions: the host wall is not (yet) split at
+    the point, so the endpoint shows up as degree-1 in the node graph
+    even though geometrically a T exists. Downstream passes like
+    ``manhattan_t_project`` and ``fuse_close_endpoints`` materialise
+    them into real degree-3 nodes.
+
+    Only wall bodies count as valid hosts — doors and windows attach to
+    walls but never anchor each other (matches SemanticGate's "attach"
+    legality table). Without this filter, the score would reward a door
+    endpoint snapping onto another door's body, which is geometric
+    coincidence, not a real T-junction.
+
+    The score rewards this state proportionally so that "snap loose
+    endpoint onto orthogonal *wall* trunk's body" candidates earn a
+    positive delta on their own — replacing the compound-macro approach
+    that proved index-unsafe in the apply_candidate / batch-accept loop.
+    """
+    if not segments:
+        return 0
+    deg = _node_degree_counter(segments)
+    loose_pts = [pt for pt, d in deg.items() if d == 1]
+    if not loose_pts:
+        return 0
+    count = 0
+    # Only walls qualify as junction hosts.
+    h_walls: List[Tuple[float, float, float]] = []
+    v_walls: List[Tuple[float, float, float]] = []
+    for s in segments:
+        if s.get("type") != "wall":
+            continue
+        ax = _segments_axis(s)
+        if ax == "h":
+            x0, x1 = sorted((float(s["x1"]), float(s["x2"])))
+            h_walls.append((float(s["y1"]), x0, x1))
+        elif ax == "v":
+            y0, y1 = sorted((float(s["y1"]), float(s["y2"])))
+            v_walls.append((float(s["x1"]), y0, y1))
+    if not h_walls and not v_walls:
+        return 0
+    for (px, py) in loose_pts:
+        hit = False
+        for (sy, x0, x1) in h_walls:
+            if abs(py - sy) > tol:
+                continue
+            if x0 + tol < px < x1 - tol:
+                hit = True
+                break
+        if hit:
+            count += 1
+            continue
+        for (sx, y0, y1) in v_walls:
+            if abs(px - sx) > tol:
+                continue
+            if y0 + tol < py < y1 - tol:
+                count += 1
+                break
+    return count
+
+
 def opening_attachment_ratio(walls: Sequence[Dict],
                              openings: Sequence[Dict],
                              tol: float = ENDPOINT_COINCIDENCE_PX) -> float:
@@ -389,6 +454,7 @@ def compute_score(segments: Sequence[Dict],
     terms["phantom"] = phantom_penalty(walls, wall_evidence)
     terms["duplicate"] = float(duplicate_penalty(segments))
     terms["junction"] = float(junction_count(segments))
+    terms["pseudo_junction"] = float(pseudo_junction_count(segments))
     terms["opening_attachment"] = opening_attachment_ratio(walls, openings)
     terms["manhattan_consistency"] = manhattan_consistency(segments)
 
@@ -411,7 +477,7 @@ def format_score(score: PipelineScore) -> str:
     lines = [f"  total = {score.total:+.4f}"]
     for k in ("wall_evidence", "opening_evidence",
               "free_endpoint", "invalid_crossing",
-              "phantom", "duplicate", "junction",
+              "phantom", "duplicate", "junction", "pseudo_junction",
               "opening_attachment", "manhattan_consistency"):
         v = score.terms.get(k, 0.0)
         w = PRIMARY_WEIGHTS.get(k, DERIVED_COEFFS.get(k, 1.0))

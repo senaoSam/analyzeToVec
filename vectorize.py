@@ -1124,7 +1124,7 @@ def mask_gated_l_extend(segments: List[Dict],
                                       door_mask=door_mask,
                                       window_mask=window_mask)
         delta = trial_score.total - base_score.total
-        if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+        if delta > CANDIDATE_MIN_ACCEPT_DELTA:
             current = trial
             base_score = trial_score
             for (idx, end, _, _) in cand.mutate:
@@ -2199,7 +2199,7 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                                           door_mask=door_mask,
                                           window_mask=window_mask)
             delta = trial_score.total - base_score.total
-            if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+            if delta > CANDIDATE_MIN_ACCEPT_DELTA:
                 current = trial
                 base_score = trial_score
                 for (idx, end, _, _) in cand.mutate:
@@ -2570,7 +2570,7 @@ def brute_force_ray_extend(lines: List[Dict],
                                           door_mask=door_mask,
                                           window_mask=window_mask)
             delta = trial_score.total - base_score.total
-            if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+            if delta > CANDIDATE_MIN_ACCEPT_DELTA:
                 current = trial
                 base_score = trial_score
                 for (idx, end, _, _) in cand.mutate:
@@ -2953,7 +2953,7 @@ def extend_trunk_to_loose(lines: List[Dict],
                                           door_mask=door_mask,
                                           window_mask=window_mask)
             delta = trial_score.total - base_score.total
-            if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+            if delta > CANDIDATE_MIN_ACCEPT_DELTA:
                 current = trial
                 base_score = trial_score
                 for (idx, end, _, _) in cand.mutate:
