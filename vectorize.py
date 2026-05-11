@@ -1943,13 +1943,15 @@ def final_polish_short_tails(segments: List[Dict],
 # ---------------------------------------------------------------------------
 
 
-def brute_force_ray_extend(lines: List[Dict],
-                           tol: float,
-                           loose_tol: float) -> None:
-    """Mutate `lines` IN PLACE: extend any loose horizontal endpoint to the
-    nearest vertical (within tol) or vice versa.
+def _brute_force_ray_extend_legacy(lines: List[Dict],
+                                    tol: float,
+                                    loose_tol: float) -> None:
+    """Legacy step-1-era implementation kept for reference (no global cost
+    check). Replaced by ``brute_force_ray_extend``, which proposes the same
+    snaps as candidates and only accepts those whose pipeline-score delta
+    is non-negative.
 
-    "Loose" means no other endpoint sits within loose_tol of this endpoint.
+    TODO(refactor): delete once step 4 is bedded in.
     """
     n = len(lines)
     # Pre-collect endpoints for the loose-detection scan.
@@ -2067,6 +2069,178 @@ def brute_force_ray_extend(lines: List[Dict],
                         endpoints[slot] = (ex, best_y)
         if not any_change:
             break
+
+
+# Brute-force ray extend snaps loose endpoints onto orthogonal lines'
+# bodies. The improvement only materialises when a *later* pass (typically
+# manhattan_t_project) registers the new coincidence as a T junction; the
+# direct, isolated-pass score-delta is therefore often ~0. We allow such
+# zero-delta accepts (instead of strict positive) so the pass still does
+# its preparatory job; the score still rejects snaps that *worsen* other
+# terms (e.g. invalid_crossing, phantom).
+BRUTE_FORCE_MIN_ACCEPT_DELTA = -1e-6
+
+
+def brute_force_ray_extend(lines: List[Dict],
+                           tol: float,
+                           loose_tol: float,
+                           *,
+                           wall_evidence: np.ndarray = None,
+                           door_mask: np.ndarray = None,
+                           window_mask: np.ndarray = None) -> None:
+    """Candidate-based step-4 implementation of the brute-force ray pass.
+
+    Each loose endpoint generates at most one Candidate: snap it onto the
+    nearest orthogonal trunk's axis line within ``tol``, in the segment's
+    free direction (so the snap never shrinks or inverts the host). The
+    gates are purely geometric (axis match + free-direction check + tol);
+    scoring then admits any candidate that does not regress total score.
+
+    Same call signature as legacy, plus optional masks/evidence kwargs for
+    scoring. Cascading is bounded to 4 passes, matching legacy behaviour.
+    """
+    import candidates as C
+    import scoring as S
+
+    if not lines:
+        return
+
+    def _is_loose(endpoints: List[Tuple[float, float]],
+                  self_idx: int, ex: float, ey: float) -> bool:
+        loose2 = loose_tol * loose_tol
+        for k, (px, py) in enumerate(endpoints):
+            if k == self_idx:
+                continue
+            if (px - ex) * (px - ex) + (py - ey) * (py - ey) <= loose2:
+                return False
+        return True
+
+    for _pass in range(4):
+        n = len(lines)
+        if n < 2:
+            return
+        endpoints: List[Tuple[float, float]] = []
+        for s in lines:
+            endpoints.append((s["x1"], s["y1"]))
+            endpoints.append((s["x2"], s["y2"]))
+        axis = [_seg_axis_strict(s) for s in lines]
+
+        cands: List[C.Candidate] = []
+        for i in range(n):
+            seg = lines[i]
+            seg_ax = axis[i]
+            if seg_ax not in ("h", "v"):
+                continue
+            for end_idx, end in enumerate(("1", "2")):
+                slot = 2 * i + end_idx
+                ex = float(seg[f"x{end}"])
+                ey = float(seg[f"y{end}"])
+                if not _is_loose(endpoints, slot, ex, ey):
+                    continue
+                other_end = "2" if end == "1" else "1"
+                ox = float(seg[f"x{other_end}"])
+                oy = float(seg[f"y{other_end}"])
+
+                if seg_ax == "h":
+                    free_dir = 1.0 if ex > ox else -1.0
+                    best_d = tol
+                    best_x = None
+                    for j in range(n):
+                        if i == j or axis[j] != "v":
+                            continue
+                        v = lines[j]
+                        line_x = float(v["x1"])
+                        if abs(line_x - ox) < 1e-6:
+                            continue
+                        if (line_x - ox) * free_dir <= 0:
+                            continue
+                        lo, hi = sorted((float(v["y1"]), float(v["y2"])))
+                        if ey < lo - tol or ey > hi + tol:
+                            continue
+                        if ey < lo:
+                            dy_c = lo - ey
+                        elif ey > hi:
+                            dy_c = ey - hi
+                        else:
+                            dy_c = 0.0
+                        d = float(np.hypot(ex - line_x, dy_c))
+                        if d < best_d:
+                            best_d = d
+                            best_x = line_x
+                    if best_x is not None and best_x != ex:
+                        cands.append(C.Candidate(
+                            op="l_extend",
+                            add=[],
+                            mutate=[(i, end, best_x, ey)],
+                            meta={"distance": best_d, "axis": "h_to_v"},
+                        ))
+
+                else:  # seg_ax == "v"
+                    free_dir = 1.0 if ey > oy else -1.0
+                    best_d = tol
+                    best_y = None
+                    for j in range(n):
+                        if i == j or axis[j] != "h":
+                            continue
+                        h = lines[j]
+                        line_y = float(h["y1"])
+                        if abs(line_y - oy) < 1e-6:
+                            continue
+                        if (line_y - oy) * free_dir <= 0:
+                            continue
+                        lo, hi = sorted((float(h["x1"]), float(h["x2"])))
+                        if ex < lo - tol or ex > hi + tol:
+                            continue
+                        if ex < lo:
+                            dx_c = lo - ex
+                        elif ex > hi:
+                            dx_c = ex - hi
+                        else:
+                            dx_c = 0.0
+                        d = float(np.hypot(dx_c, ey - line_y))
+                        if d < best_d:
+                            best_d = d
+                            best_y = line_y
+                    if best_y is not None and best_y != ey:
+                        cands.append(C.Candidate(
+                            op="l_extend",
+                            add=[],
+                            mutate=[(i, end, ex, best_y)],
+                            meta={"distance": best_d, "axis": "v_to_h"},
+                        ))
+
+        if not cands:
+            return
+
+        cands.sort(key=lambda c: c.meta["distance"])
+
+        current = list(lines)
+        base_score = S.compute_score(current,
+                                     wall_evidence=wall_evidence,
+                                     door_mask=door_mask,
+                                     window_mask=window_mask)
+        used_mutations: Set[Tuple[int, str]] = set()
+        any_accepted = False
+        for cand in cands:
+            if any((idx, end) in used_mutations
+                   for (idx, end, _, _) in cand.mutate):
+                continue
+            trial = C.apply_candidate(current, cand)
+            trial_score = S.compute_score(trial,
+                                          wall_evidence=wall_evidence,
+                                          door_mask=door_mask,
+                                          window_mask=window_mask)
+            delta = trial_score.total - base_score.total
+            if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+                current = trial
+                base_score = trial_score
+                for (idx, end, _, _) in cand.mutate:
+                    used_mutations.add((idx, end))
+                any_accepted = True
+        lines.clear()
+        lines.extend(current)
+        if not any_accepted:
+            return
 
 
 def extend_trunk_to_loose(lines: List[Dict],
