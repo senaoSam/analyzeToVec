@@ -3904,16 +3904,14 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # candidate-architecture cross-checks.
     # Insert missing connectors: pairs of loose endpoints that share an x
     # (or y) but were never linked by a real segment get a synthetic wall
-    # bridging them, closing the L into a watertight rectangle. Gated on
-    # the wall mask so phantom walls across open doorways aren't created.
-    #
-    # Not yet folded into ``proximal_bridge_generator``: the bridge
-    # generator proposes the same axis-bridge but does NOT snap the
-    # existing endpoints onto the bridge axis. Without the snap the
-    # bridge floats next to (rather than connects) the source walls and
-    # score correctly rejects it. Folding requires extending the
-    # generator to emit safe endpoint-mutations (only when the source
-    # segment's free direction permits the snap); deferred.
+    # bridging them. Gated on the wall mask. Kept *despite* the bridge
+    # generator above also proposing axis-bridges; the legacy pass also
+    # collapses near-parallel V (or H) walls into a single bridge via a
+    # silent "snap x → diagonal → drop in merge" side-effect, which the
+    # generator deliberately does not replicate (the generator only
+    # mutates endpoints along axis-preserving directions). The merge-
+    # parallel behaviour belongs in a future generator analogous to
+    # cluster_parallel_duplicates; until then both passes coexist.
     insert_missing_connectors(snapped, colinear_loose,
                               connector_max,
                               wall_mask=masks.get("wall"))

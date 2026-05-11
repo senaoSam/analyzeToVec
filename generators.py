@@ -32,11 +32,22 @@ is rich enough to let the score model do the work.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 import candidates as C
+
+
+def _axis_of(seg: Dict) -> str:
+    """Return "h", "v" or "d" for the segment's axis (strict equality)."""
+    dx = abs(float(seg["x2"]) - float(seg["x1"]))
+    dy = abs(float(seg["y2"]) - float(seg["y1"]))
+    if dy < 1e-6 and dx > 1e-6:
+        return "h"
+    if dx < 1e-6 and dy > 1e-6:
+        return "v"
+    return "d"
 
 
 # ---------------------------------------------------------------------------
@@ -86,52 +97,62 @@ def proximal_bridge_candidates(segments: List[Dict],
     that sit within ``max_radius`` of each other and are not already
     coincident, enumerate the geometrically valid axis-aligned bridges
     connecting them, gate by mask support, and return the survivors as
-    ``Candidate`` objects (with ``add=`` populated; no ``mutate`` /
-    ``remove``).
+    ``Candidate`` objects.
 
     Bridge enumeration cases:
 
-      - **axis-bridge** (1 new wall): if |dx| ≤ colinear_tol XOR
-        |dy| ≤ colinear_tol — the endpoints share a near-common axis;
-        a single new H or V segment joins them.
+      - **axis-bridge** (1 new wall, optional safe endpoint-mutation):
+        if |dx| ≤ colinear_tol XOR |dy| ≤ colinear_tol — the endpoints
+        share a near-common axis; a single new H or V segment joins them.
+        The candidate **also** mutates each source endpoint onto the
+        bridge axis when that mutation is along the owning segment's
+        free direction (i.e. mutating x of an H endpoint extends the H
+        body, but mutating x of a V endpoint would break Manhattan and
+        is forbidden). This is the case ``insert_missing_connectors``
+        used to handle via direct mutate; folded in here.
 
-      - **L-bridge** (2 new walls): if both |dx| > colinear_tol and
-        |dy| > colinear_tol — neither axis aligns. Two corner orientations
-        are proposed (corner at (b.x, a.y) and corner at (a.x, b.y));
-        each yields one H + one V new segment. The scorer picks between
-        them via the same delta-evaluation as every other candidate.
+      - **L-bridge** (2 new walls, no mutate): if both |dx| > colinear_tol
+        and |dy| > colinear_tol — neither axis aligns. Two corner
+        orientations are proposed (corner at (b.x, a.y) and corner at
+        (a.x, b.y)); each yields one H + one V new segment. The scorer
+        picks between them. junction-aware merge folds the new bridge
+        into the host trunks downstream, giving the same final pixel
+        set as the older mask_gated_l_extend mutate.
 
     The gates:
 
       - **wall_mask gate**: each proposed segment is sampled against the
         wall mask; if any falls below ``min_support`` fraction on-mask,
-        the proposal is dropped before scoring. This is the same evidence
-        gate the older mask-based passes use, generalised here.
+        the proposal is dropped before scoring.
 
-      - **chromatic avoidance** is *implicit* via the wall_mask: per
-        ``segment_colors``, the wall mask has door / window pixels
-        suppressed, so a bridge across an opening reports near-zero
-        support and is rejected.
+      - **safe-mutate gate**: a mutation is emitted only when the
+        endpoint's owning segment axis is perpendicular to the bridge
+        direction (so the mutation extends the segment along its free
+        axis, preserving H-/V-strictness).
 
-    The mask gate is the only generator-side reject; everything else
-    (invalid crossings, phantom, junction count, free_endpoint count) is
-    judged by ``scoring.compute_score`` when the caller runs the
-    score-and-accept loop on the returned list.
+      - **chromatic avoidance** is *implicit* via the wall_mask.
+
+    Everything else (invalid crossings, phantom, junction count,
+    free_endpoint count) is judged by ``scoring.compute_score`` when
+    the caller runs the score-and-accept loop on the returned list.
     """
     if wall_mask is None or not segments:
         return []
 
-    # All wall endpoints with their owning (seg_idx, end).
+    # All wall endpoints with owning segment + the segment's axis. The
+    # axis tells us which mutations are "safe" (axis-preserving).
     wall_endpoints: List[Dict] = []
     for i, s in enumerate(segments):
         if s.get("type") != "wall":
             continue
+        ax = _axis_of(s)
         for end in ("1", "2"):
             wall_endpoints.append({
                 "seg": i,
                 "end": end,
                 "x": float(s[f"x{end}"]),
                 "y": float(s[f"y{end}"]),
+                "seg_axis": ax,    # "h" / "v" / "d"
             })
 
     if len(wall_endpoints) < 2:
@@ -161,30 +182,55 @@ def proximal_bridge_candidates(segments: List[Dict],
             dx = abs(dxs)
             dy = abs(dys)
 
-            # Enumerate bridge proposals.
-            bridges: List[tuple] = []  # (segs_to_add, kind)
+            # Enumerate bridge proposals as
+            #   (segs_to_add, mutations, kind)
+            # where mutations is a list of (seg_idx, end, new_x, new_y).
+            bridges: List[Tuple[List[Dict], List, str]] = []
 
             if dy <= colinear_tol and dx > colinear_tol:
-                # Axis-bridge along y (shared horizontal axis).
+                # Axis-bridge along x (shared horizontal axis at y=cy):
+                # a single new H wall. Bridge runs in x; the H-direction
+                # of an endpoint's owning segment is "h", so an H-axis
+                # endpoint can safely have its y mutated to cy (along V
+                # free direction? no — wait: bridge runs horizontal at
+                # y=cy. To mutate an endpoint *onto* the bridge, we need
+                # to change that endpoint's y to cy. Changing y is along
+                # the free direction of a V segment (V's body extends in
+                # y). So only V endpoints can be safely y-mutated.
                 cy = 0.5 * (a["y"] + b["y"])
+                mutates = []
+                if a["seg_axis"] == "v" and abs(a["y"] - cy) > 1e-6:
+                    mutates.append((a["seg"], a["end"], a["x"], cy))
+                if b["seg_axis"] == "v" and abs(b["y"] - cy) > 1e-6:
+                    mutates.append((b["seg"], b["end"], b["x"], cy))
                 bridges.append((
                     [{"type": "wall",
                       "x1": min(a["x"], b["x"]), "y1": cy,
                       "x2": max(a["x"], b["x"]), "y2": cy}],
+                    mutates,
                     "axis_h"
                 ))
             elif dx <= colinear_tol and dy > colinear_tol:
-                # Axis-bridge along x (shared vertical axis).
+                # Axis-bridge along y (shared vertical axis at x=cx):
+                # a single new V wall. Mutating x is along the free
+                # direction of an H segment.
                 cx = 0.5 * (a["x"] + b["x"])
+                mutates = []
+                if a["seg_axis"] == "h" and abs(a["x"] - cx) > 1e-6:
+                    mutates.append((a["seg"], a["end"], cx, a["y"]))
+                if b["seg_axis"] == "h" and abs(b["x"] - cx) > 1e-6:
+                    mutates.append((b["seg"], b["end"], cx, b["y"]))
                 bridges.append((
                     [{"type": "wall",
                       "x1": cx, "y1": min(a["y"], b["y"]),
                       "x2": cx, "y2": max(a["y"], b["y"])}],
+                    mutates,
                     "axis_v"
                 ))
             elif dx > colinear_tol and dy > colinear_tol:
-                # L-bridge: two orientations.
-                # Orientation 1: corner at (b.x, a.y) → H then V.
+                # L-bridge: two orientations. No mutate (would risk
+                # orphaning the source corner; junction-aware merge of
+                # the bridge into the existing trunks handles topology).
                 bridges.append((
                     [{"type": "wall",
                       "x1": a["x"], "y1": a["y"],
@@ -192,9 +238,9 @@ def proximal_bridge_candidates(segments: List[Dict],
                      {"type": "wall",
                       "x1": b["x"], "y1": a["y"],
                       "x2": b["x"], "y2": b["y"]}],
+                    [],
                     "l_h_first"
                 ))
-                # Orientation 2: corner at (a.x, b.y) → V then H.
                 bridges.append((
                     [{"type": "wall",
                       "x1": a["x"], "y1": a["y"],
@@ -202,10 +248,11 @@ def proximal_bridge_candidates(segments: List[Dict],
                      {"type": "wall",
                       "x1": a["x"], "y1": b["y"],
                       "x2": b["x"], "y2": b["y"]}],
+                    [],
                     "l_v_first"
                 ))
 
-            for new_segs, kind in bridges:
+            for new_segs, mutates, kind in bridges:
                 supports: List[float] = []
                 ok = True
                 for ns in new_segs:
@@ -224,7 +271,7 @@ def proximal_bridge_candidates(segments: List[Dict],
                 cands.append(C.Candidate(
                     op="bridge",
                     add=new_segs,
-                    mutate=[],
+                    mutate=list(mutates),
                     meta={
                         "kind": kind,
                         "supports": supports,
