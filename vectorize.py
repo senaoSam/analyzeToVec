@@ -1315,6 +1315,11 @@ def force_l_corner_closure(segments: List[Dict], tol: float) -> List[Dict]:
     are both within tol but whose lines don't yet cross to the exact
     intersection (V.x, H.y). This catches L-corners that grid_snap missed
     because the body-span check excluded them.
+
+    TODO(refactor): not called by the pipeline (ablation confirmed NO-OP on
+    all 3 regression images). Kept for now in case it becomes useful in the
+    candidate-based architecture. If still unused at the end of step 4,
+    delete.
     """
     segs = [dict(s) for s in segments]
     n = len(segs)
@@ -1665,6 +1670,12 @@ def final_polish_short_tails(segments: List[Dict],
     """Step 4: drop any remaining segment shorter than min_len that has at
     least one degree-1 end AND is pure same-type at its connected end.
     Cross-type stubs (door/window jambs) are still protected.
+
+    TODO(refactor): not called by the pipeline (ablation confirmed NO-OP on
+    all 3 regression images, and regression stayed PASS after removing the
+    one call site). Kept for now in case it becomes useful in the
+    candidate-based architecture. If still unused at the end of step 4,
+    delete.
     """
     segs = [dict(s) for s in segments]
     while True:
@@ -2579,13 +2590,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # (4) Prune dangling tails — strict definition that protects cross-type
     #     connections (door/window jambs are never deleted).
     s5 = prune_tails(s4, tail_prune)
-    s5 = snap_endpoints(s5, snap_tol)
 
     # --- STRICT MANHATTAN ROUTING (zero diagonals) ----------------------
     # (a) Force every segment to be exactly horizontal or exactly vertical.
     s6 = manhattan_force_axis(s5)
-    # (b) Intersection-based L-corner snap (run twice to catch cascading).
-    s6 = manhattan_intersection_snap(s6, manhattan_tol)
+    # (b) Intersection-based L-corner snap.
     s6 = manhattan_intersection_snap(s6, manhattan_tol)
     # (c) T-junction projection onto orthogonal trunks.
     s6 = manhattan_t_project(s6, manhattan_tol)
@@ -2595,23 +2604,19 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # --- WATERTIGHT CLOSURE (kill duplicates + close gaps) --------------
     s7 = cluster_parallel_duplicates(s6, parallel_merge)
     s7 = grid_snap_endpoints(s7, grid_snap)
-    s7 = force_l_corner_closure(s7, grid_snap)
-    s7 = grid_snap_endpoints(s7, grid_snap)
     s7 = manhattan_ultimate_merge(s7)
 
     # --- ULTIMATE GAP CLOSING (degree-1 carpet bombing) -----------------
-    # (1) (degree map computed inside each pass)
-    # (2) Force-close pairs of free L-corners within 30 px to exact intersection.
+    # (1) Force-close pairs of free L-corners within gap_close px to their
+    #     exact intersection. Ablation originally marked this NO-OP, but
+    #     removing it after deleting the other NO-OP passes regressed door
+    #     IOU on Gemini_Generated — its NO-OP-ness was conditional on the
+    #     earlier passes still running. Kept.
     s8 = force_close_free_l_corners(s7, gap_close)
-    # (3) T-snap with trunk auto-extension: a loose endpoint that projects
+    # (2) T-snap with trunk auto-extension: a loose endpoint that projects
     #     past a trunk's body within tol triggers an extension of the trunk.
     #     The masks gate prevents extending through white space.
     s8 = t_snap_with_extension(s8, gap_close, masks=masks)
-    # Re-run free-L closure on whatever the T-extension exposed, then merge.
-    s8 = force_close_free_l_corners(s8, gap_close)
-    s8 = manhattan_ultimate_merge(s8)
-    # (4) Polish: drop pure same-type tails shorter than 10 px that survived.
-    s8 = final_polish_short_tails(s8, gap_final)
     s8 = manhattan_ultimate_merge(s8)
 
     snapped = s8
