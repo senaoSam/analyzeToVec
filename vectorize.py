@@ -936,25 +936,16 @@ def extend_to_intersect(segments: List[Dict], tol: float) -> List[Dict]:
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
-def mask_gated_l_extend(segments: List[Dict],
-                        max_gap: float,
-                        masks: Dict[str, np.ndarray] = None,
-                        min_support: float = 0.85) -> List[Dict]:
-    """Close asymmetric L-corner gaps that the symmetric ``extend_to_intersect``
-    rejects because one leg's extension is much longer than the other.
+def _mask_gated_l_extend_legacy(segments: List[Dict],
+                                 max_gap: float,
+                                 masks: Dict[str, np.ndarray] = None,
+                                 min_support: float = 0.85) -> List[Dict]:
+    """Legacy step-1-era implementation kept for reference (no global score
+    check). Replaced by ``mask_gated_l_extend`` which proposes the same
+    paired snaps as candidates and accepts those whose pipeline-score
+    delta is non-negative.
 
-    For each (H, V) pair of the same type whose nearest endpoints don't yet
-    share a coordinate, consider the implied L-corner at (V.x, H.y). If both
-    extension legs (the H stretching to V.x, and the V stretching to H.y) are
-    backed by the segment's source mask with at least ``min_support`` fractional
-    coverage, snap both endpoints to that intersection. Each leg may extend up
-    to ``max_gap`` pixels — the mask gate is what actually keeps this honest.
-
-    This is the fix for thick-wall transitions where the skeletonised
-    horizontal centreline ends a few pixels before the perpendicular wall and
-    the perpendicular's centreline starts on the *other side* of the corner —
-    so the two ends are separated in both axes simultaneously and the regular
-    extend_to_intersect (which requires both legs short) won't act.
+    TODO(refactor): delete once step 4 is bedded in.
     """
     if masks is None:
         return [dict(s) for s in segments]
@@ -1018,6 +1009,127 @@ def mask_gated_l_extend(segments: List[Dict],
             v[f"y{v_end[0]}"] = h_y
 
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+
+def mask_gated_l_extend(segments: List[Dict],
+                        max_gap: float,
+                        masks: Dict[str, np.ndarray] = None,
+                        min_support: float = 0.85,
+                        *,
+                        wall_evidence: np.ndarray = None,
+                        door_mask: np.ndarray = None,
+                        window_mask: np.ndarray = None) -> List[Dict]:
+    """Candidate-based step-4 implementation.
+
+    For each same-type (H, V) pair whose nearest endpoints sit in a
+    both-axes-asymmetric gap (each axis offset is in [2.0, max_gap]),
+    propose an atomic corner snap: move H's nearest end to (V.x, H.y)
+    and V's nearest end to (V.x, H.y) in one Candidate. Mask support on
+    both extension legs (against the segment's own type mask) ≥
+    min_support is the cheap evidence gate; scoring then admits any
+    candidate whose pipeline-score delta is non-negative.
+
+    Returns a new segment list — same calling convention as the legacy
+    implementation so the pipeline wiring in vectorize_bgr stays
+    unchanged.
+    """
+    import candidates as C
+    import scoring as S
+
+    if masks is None or not segments:
+        return [dict(s) for s in segments]
+    if door_mask is None:
+        door_mask = masks.get("door")
+    if window_mask is None:
+        window_mask = masks.get("window")
+
+    segs = [dict(s) for s in segments]
+    n = len(segs)
+    axis = [_seg_axis_strict(s) for s in segs]
+
+    cands: List[C.Candidate] = []
+    for i in range(n):
+        if axis[i] != "h":
+            continue
+        h = segs[i]
+        h_y = float(h["y1"])
+        for j in range(n):
+            if axis[j] != "v":
+                continue
+            v = segs[j]
+            if v["type"] != h["type"]:
+                continue
+            v_x = float(v["x1"])
+
+            h_ends = (("1", float(h["x1"])), ("2", float(h["x2"])))
+            v_ends = (("1", float(v["y1"])), ("2", float(v["y2"])))
+            h_end = min(h_ends, key=lambda e: abs(e[1] - v_x))
+            v_end = min(v_ends, key=lambda e: abs(e[1] - h_y))
+
+            dx = abs(h_end[1] - v_x)
+            dy = abs(v_end[1] - h_y)
+            if dx < 2.0 or dy < 2.0:
+                continue
+            if dx > max_gap or dy > max_gap:
+                continue
+
+            h_lo, h_hi = sorted((float(h["x1"]), float(h["x2"])))
+            v_lo, v_hi = sorted((float(v["y1"]), float(v["y2"])))
+            if h_lo - 1 < v_x < h_hi + 1:
+                continue
+            if v_lo - 1 < h_y < v_hi + 1:
+                continue
+
+            type_mask = masks.get(h["type"])
+            if type_mask is None:
+                continue
+
+            h_support = _path_mask_support(type_mask, h_end[1], h_y, v_x, h_y)
+            if h_support < min_support:
+                continue
+            v_support = _path_mask_support(type_mask, v_x, v_end[1], v_x, h_y)
+            if v_support < min_support:
+                continue
+
+            mut = [
+                (i, h_end[0], v_x, h_y),   # H's end snaps x → v_x; y stays
+                (j, v_end[0], v_x, h_y),   # V's end snaps y → h_y; x stays
+            ]
+            cands.append(C.Candidate(
+                op="l_extend",
+                add=[],
+                mutate=mut,
+                meta={"h_support": h_support, "v_support": v_support,
+                      "dx": dx, "dy": dy, "total_gap": dx + dy},
+            ))
+
+    if not cands:
+        return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+    cands.sort(key=lambda c: c.meta["total_gap"])
+
+    current = segs
+    base_score = S.compute_score(current,
+                                 wall_evidence=wall_evidence,
+                                 door_mask=door_mask,
+                                 window_mask=window_mask)
+    used_mutations: Set[Tuple[int, str]] = set()
+    for cand in cands:
+        if any((idx, end) in used_mutations
+               for (idx, end, _, _) in cand.mutate):
+            continue
+        trial = C.apply_candidate(current, cand)
+        trial_score = S.compute_score(trial,
+                                      wall_evidence=wall_evidence,
+                                      door_mask=door_mask,
+                                      window_mask=window_mask)
+        delta = trial_score.total - base_score.total
+        if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+            current = trial
+            base_score = trial_score
+            for (idx, end, _, _) in cand.mutate:
+                used_mutations.add((idx, end))
+    return [s for s in current if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
 def truncate_overshoots(segments: List[Dict], tol: float) -> List[Dict]:
