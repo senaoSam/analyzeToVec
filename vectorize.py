@@ -343,6 +343,94 @@ def branches_to_segments(branches: List[List[Tuple[int, int]]]) -> List[Tuple[fl
 
 
 # ---------------------------------------------------------------------------
+# Step 3b: connected-component path for door / window
+# ---------------------------------------------------------------------------
+#
+# Skeletonizing a thick filled door / window rectangle is the slow road: it
+# collapses to a 1-pixel centerline, then the downstream pipeline has to re-
+# infer its width from neighbouring walls. The CC-based path here treats
+# each chromatic component as a rectangle directly: minAreaRect gives the
+# 4 corners, and the two long edges plus two short jambs are emitted as
+# segments. The downstream snap pipeline still runs on these, so wall-
+# attachment and Manhattan alignment behave as before.
+#
+# Filter constants are intentionally loose — the HSV masks for door/window
+# are already very clean, so we don't need aggressive component pruning here.
+
+DOOR_WINDOW_MIN_AREA_PX = 20       # drop noise blobs
+DOOR_WINDOW_MIN_LONG_PX = 8        # drop too-small components
+DOOR_WINDOW_MIN_ASPECT = 1.5       # must be elongated (drop near-square)
+
+
+def door_window_to_segments(mask: np.ndarray) -> List[Tuple[float, float, float, float]]:
+    """Decompose a door / window mask into a centerline + short jambs.
+
+    Returns a list of (x1, y1, x2, y2) segments. Each connected component
+    that passes the area / aspect filters contributes up to 3 segments:
+    one centerline running along the long axis of its min-area rectangle
+    (midpoint of one short edge to midpoint of the other) plus the two
+    short edges (jambs) at the ends.
+
+    This preserves the same topology as the old skeletonize → branches →
+    approxPolyDP path (single centerline through the middle of the
+    rectangle) so the downstream snap pipeline behaves the same, while
+    skipping the slow skeleton work.
+    """
+    if mask is None or mask.size == 0:
+        return []
+    bin_mask = (mask > 0).astype(np.uint8)
+    if not bin_mask.any():
+        return []
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
+    segments: List[Tuple[float, float, float, float]] = []
+    for lab in range(1, n_labels):  # skip background (0)
+        area = int(stats[lab, cv2.CC_STAT_AREA])
+        if area < DOOR_WINDOW_MIN_AREA_PX:
+            continue
+        ys, xs = np.where(labels == lab)
+        if xs.size < 5:
+            continue
+        pts = np.stack([xs, ys], axis=1).astype(np.float32)
+        rect = cv2.minAreaRect(pts)  # ((cx, cy), (w, h), angle)
+        (_, _), (rw, rh), _ = rect
+        long_side = max(rw, rh)
+        short_side = min(rw, rh)
+        if long_side < DOOR_WINDOW_MIN_LONG_PX:
+            continue
+        # Aspect filter — avoid near-square chromatic blobs (likely UI icons
+        # or text), but allow short_side==0 (degenerate line component) so
+        # very thin strokes still pass.
+        if short_side > 0 and (long_side / short_side) < DOOR_WINDOW_MIN_ASPECT:
+            continue
+
+        box = cv2.boxPoints(rect)  # 4 corners in CCW order
+        # Edges (0,1) and (2,3) form one parallel pair; (1,2) and (3,0) the other.
+        def _elen(a, b):
+            return float(np.hypot(a[0] - b[0], a[1] - b[1]))
+        e01 = _elen(box[0], box[1])
+        e12 = _elen(box[1], box[2])
+        if e01 >= e12:
+            # Long edges are (0,1) and (2,3); short jambs are (1,2) and (3,0).
+            jamb_a = (box[1], box[2])
+            jamb_b = (box[3], box[0])
+        else:
+            # Long edges are (1,2) and (3,0); short jambs are (0,1) and (2,3).
+            jamb_a = (box[0], box[1])
+            jamb_b = (box[2], box[3])
+        # Centerline runs midpoint(jamb_a) → midpoint(jamb_b).
+        ma = ((jamb_a[0][0] + jamb_a[1][0]) * 0.5, (jamb_a[0][1] + jamb_a[1][1]) * 0.5)
+        mb = ((jamb_b[0][0] + jamb_b[1][0]) * 0.5, (jamb_b[0][1] + jamb_b[1][1]) * 0.5)
+        for (p, q) in ((ma, mb), jamb_a, jamb_b):
+            x1, y1 = float(p[0]), float(p[1])
+            x2, y2 = float(q[0]), float(q[1])
+            if (x1, y1) == (x2, y2):
+                continue
+            segments.append((x1, y1, x2, y2))
+    return segments
+
+
+# ---------------------------------------------------------------------------
 # Step 4: NetworkX node snapping
 # ---------------------------------------------------------------------------
 
@@ -2552,11 +2640,17 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     typed_segments: List[Dict] = []
     branch_stats = {}
     for label, mask in masks.items():
-        _log(f"  Skeletonize ({label})...")
-        skel = skeletonize_mask(mask)
-        branches = extract_branches(skel)
-        segs = branches_to_segments(branches)
-        branch_stats[label] = (int(skel.sum()), len(branches), len(segs))
+        if label == "wall":
+            _log(f"  Skeletonize ({label})...")
+            skel = skeletonize_mask(mask)
+            branches = extract_branches(skel)
+            segs = branches_to_segments(branches)
+            branch_stats[label] = (int(skel.sum()), len(branches), len(segs))
+        else:
+            # Door / window: connected components → min-area rect → 4 sides.
+            _log(f"  Component-rects ({label})...")
+            segs = door_window_to_segments(mask)
+            branch_stats[label] = (int((mask > 0).sum()), 0, len(segs))
         for x1, y1, x2, y2 in segs:
             typed_segments.append({"type": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
 
