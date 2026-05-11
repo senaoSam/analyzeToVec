@@ -1812,21 +1812,15 @@ def force_close_free_l_corners(segments: List[Dict],
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
-def t_snap_with_extension(segments: List[Dict], tol: float,
-                          masks: Dict[str, np.ndarray] = None,
-                          min_support: float = 0.6) -> List[Dict]:
-    """Step 3: for each remaining degree-1 endpoint, find the closest
-    orthogonal trunk segment whose perpendicular distance is within tol.
+def _t_snap_with_extension_legacy(segments: List[Dict], tol: float,
+                                   masks: Dict[str, np.ndarray] = None,
+                                   min_support: float = 0.6) -> List[Dict]:
+    """Legacy step-1-era implementation kept for reference (no global score
+    check). Replaced by ``t_snap_with_extension`` which proposes the same
+    edits as candidates and accepts those whose pipeline-score delta is
+    non-negative.
 
-    If the projection point falls inside the trunk's body, snap as in
-    grid_snap_endpoints. If it falls past the trunk's body (within tol of
-    one of the trunk's ends), EXTEND the trunk so its body covers the
-    new joint, then snap. Walls are never extended to accommodate
-    chromatic endpoints.
-
-    If `masks` is provided, the proposed trunk-extension stretch is
-    sampled against the trunk's own type mask; only paths with >=
-    `min_support` fractional coverage are accepted.
+    TODO(refactor): delete once step 4 is bedded in.
     """
     segs = [dict(s) for s in segments]
 
@@ -1986,6 +1980,239 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                 done.add((trunk_idx, "1"))
                 done.add((trunk_idx, "2"))
         if not changed:
+            break
+
+    return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+
+def t_snap_with_extension(segments: List[Dict], tol: float,
+                          masks: Dict[str, np.ndarray] = None,
+                          min_support: float = 0.6,
+                          *,
+                          wall_evidence: np.ndarray = None,
+                          door_mask: np.ndarray = None,
+                          window_mask: np.ndarray = None) -> List[Dict]:
+    """Candidate-based step-4 implementation.
+
+    Same outer structure as the legacy (up to 6 sweep passes), but every
+    accepted snap goes through Candidate generation + score evaluation:
+
+      1. For each degree-1 endpoint of segment i / end e:
+         - perpendicular distance to orthogonal trunk axis ≤ tol
+         - projection on the trunk body, or past it by ≤ tol
+         - wall-priority: walls never project onto chromatic, walls never
+           get extended to accommodate chromatic
+      2. If extending the trunk is needed, the trunk-extension stretch
+         must have mask support ≥ min_support on the trunk's own type
+         mask (cheap evidence gate).
+      3. Each Candidate atomically: optional trunk-end mutate, loose-end
+         mutate, opposite-end-of-loose-seg mutate (axis-keep).
+      4. Score-and-accept: delta ≥ BRUTE_FORCE_MIN_ACCEPT_DELTA (matches
+         the other deferred-payoff passes — the T-junction registers in
+         a downstream pass).
+
+    Returns a fresh list (legacy convention).
+    """
+    import candidates as C
+    import scoring as S
+
+    if not segments:
+        return []
+
+    if door_mask is None and masks is not None:
+        door_mask = masks.get("door")
+    if window_mask is None and masks is not None:
+        window_mask = masks.get("window")
+
+    segs = [dict(s) for s in segments]
+    MAX_PASSES = 6
+
+    for _pass in range(MAX_PASSES):
+        deg, _ = _build_degree_map(segs)
+        n = len(segs)
+        axis = [_seg_axis_strict(s) for s in segs]
+
+        cands: List[C.Candidate] = []
+        for i in range(n):
+            seg = segs[i]
+            my_axis = axis[i]
+            if my_axis not in ("h", "v"):
+                continue
+            my_prio = TYPE_PRIORITY.get(seg["type"], 99)
+            for end in ("1", "2"):
+                ex = float(seg[f"x{end}"])
+                ey = float(seg[f"y{end}"])
+                if deg[_qkey(ex, ey)] != 1:
+                    continue
+
+                best = None
+                best_d = tol
+                for j in range(n):
+                    if i == j or axis[j] == my_axis or axis[j] not in ("h", "v"):
+                        continue
+                    trunk = segs[j]
+                    trunk_prio = TYPE_PRIORITY.get(trunk["type"], 99)
+                    if my_prio < trunk_prio:
+                        continue
+                    if axis[j] == "v":
+                        line_x = float(trunk["x1"])
+                        t_lo, t_hi = sorted((float(trunk["y1"]), float(trunk["y2"])))
+                        dx = abs(ex - line_x)
+                        if dx > tol:
+                            continue
+                        proj_y = ey
+                        if t_lo <= proj_y <= t_hi:
+                            need_extend = None
+                        elif proj_y < t_lo and (t_lo - proj_y) <= tol:
+                            need_extend = "lo"
+                        elif proj_y > t_hi and (proj_y - t_hi) <= tol:
+                            need_extend = "hi"
+                        else:
+                            continue
+                        if need_extend is not None and trunk_prio < my_prio:
+                            continue
+                        d = dx
+                        if d < best_d:
+                            best_d = d
+                            best = (j, line_x, proj_y, need_extend, "v")
+                    else:
+                        line_y = float(trunk["y1"])
+                        t_lo, t_hi = sorted((float(trunk["x1"]), float(trunk["x2"])))
+                        dy = abs(ey - line_y)
+                        if dy > tol:
+                            continue
+                        proj_x = ex
+                        if t_lo <= proj_x <= t_hi:
+                            need_extend = None
+                        elif proj_x < t_lo and (t_lo - proj_x) <= tol:
+                            need_extend = "lo"
+                        elif proj_x > t_hi and (proj_x - t_hi) <= tol:
+                            need_extend = "hi"
+                        else:
+                            continue
+                        if need_extend is not None and trunk_prio < my_prio:
+                            continue
+                        d = dy
+                        if d < best_d:
+                            best_d = d
+                            best = (j, proj_x, line_y, need_extend, "h")
+
+                if best is None:
+                    continue
+
+                trunk_idx, snap_x, snap_y, need_extend, trunk_axis = best
+                trunk = segs[trunk_idx]
+
+                # Evidence gate on trunk-extension stretch.
+                if need_extend is not None and masks is not None:
+                    trunk_mask = masks.get(trunk["type"])
+                    if trunk_mask is not None:
+                        if trunk_axis == "v":
+                            old_lo, old_hi = sorted((float(trunk["y1"]),
+                                                     float(trunk["y2"])))
+                            if need_extend == "lo":
+                                ext_lo, ext_hi = min(snap_y, old_lo), old_lo
+                            else:
+                                ext_lo, ext_hi = old_hi, max(snap_y, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, snap_x, ext_lo, snap_x, ext_hi)
+                                if support < min_support:
+                                    continue
+                        else:
+                            old_lo, old_hi = sorted((float(trunk["x1"]),
+                                                     float(trunk["x2"])))
+                            if need_extend == "lo":
+                                ext_lo, ext_hi = min(snap_x, old_lo), old_lo
+                            else:
+                                ext_lo, ext_hi = old_hi, max(snap_x, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, ext_lo, snap_y, ext_hi, snap_y)
+                                if support < min_support:
+                                    continue
+
+                # Build mutation list.
+                mut: List[Tuple[int, str, float, float]] = []
+                if need_extend is not None:
+                    if trunk_axis == "v":
+                        is_y1_lo = float(trunk["y1"]) <= float(trunk["y2"])
+                        lo_end, hi_end = ("1", "2") if is_y1_lo else ("2", "1")
+                        target_end = lo_end if need_extend == "lo" else hi_end
+                        mut.append((trunk_idx, target_end,
+                                    float(trunk[f"x{target_end}"]), snap_y))
+                    else:
+                        is_x1_lo = float(trunk["x1"]) <= float(trunk["x2"])
+                        lo_end, hi_end = ("1", "2") if is_x1_lo else ("2", "1")
+                        target_end = lo_end if need_extend == "lo" else hi_end
+                        mut.append((trunk_idx, target_end,
+                                    snap_x, float(trunk[f"y{target_end}"])))
+                mut.append((i, end, snap_x, snap_y))
+                other = "2" if end == "1" else "1"
+                if my_axis == "h":
+                    mut.append((i, other, float(seg[f"x{other}"]), snap_y))
+                else:
+                    mut.append((i, other, snap_x, float(seg[f"y{other}"])))
+
+                cands.append(C.Candidate(
+                    op="t_snap",
+                    add=[],
+                    mutate=mut,
+                    meta={"d": best_d, "need_extend": need_extend,
+                          "trunk_idx": trunk_idx},
+                ))
+
+        if not cands:
+            return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+        # No sort: candidates were generated in (i, end) order; legacy
+        # processed loose endpoints in the same order, and matching that
+        # iteration order keeps the legacy's tie-breaking on which
+        # endpoint claims which trunk first.
+
+        current = segs
+        base_score = S.compute_score(current,
+                                     wall_evidence=wall_evidence,
+                                     door_mask=door_mask,
+                                     window_mask=window_mask)
+        used_mutations: Set[Tuple[int, str]] = set()
+        any_accepted = False
+        # Match legacy "trunk locked for rest of pass" semantics: once a
+        # trunk has had any mutation accepted in this pass, neither of its
+        # ends is open to further mutation until the next pass.
+        locked_trunks: Set[int] = set()
+
+        for cand in cands:
+            # Skip if the candidate would touch a trunk already locked this
+            # pass (legacy `done` set semantics).
+            mut_idxs = {idx for (idx, _, _, _) in cand.mutate}
+            if cand.meta["trunk_idx"] in locked_trunks:
+                continue
+            if any(li in locked_trunks for li in mut_idxs):
+                continue
+            if any((idx, end) in used_mutations
+                   for (idx, end, _, _) in cand.mutate):
+                continue
+            trial = C.apply_candidate(current, cand)
+            trial_score = S.compute_score(trial,
+                                          wall_evidence=wall_evidence,
+                                          door_mask=door_mask,
+                                          window_mask=window_mask)
+            delta = trial_score.total - base_score.total
+            if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+                current = trial
+                base_score = trial_score
+                for (idx, end, _, _) in cand.mutate:
+                    used_mutations.add((idx, end))
+                # Legacy adds (trunk_idx, "1") and (trunk_idx, "2") to done
+                # after EVERY accepted snap (regardless of extension), so
+                # the trunk can't be re-snapped within the same pass. Mirror
+                # that here.
+                locked_trunks.add(cand.meta["trunk_idx"])
+                any_accepted = True
+
+        segs = current
+        if not any_accepted:
             break
 
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
