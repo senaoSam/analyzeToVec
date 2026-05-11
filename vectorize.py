@@ -139,58 +139,184 @@ L_EXT_ASYM_PX = 50.0
 # ---------------------------------------------------------------------------
 # Step 1: color segmentation
 # ---------------------------------------------------------------------------
+#
+# Wall detection now goes through a multi-detector evidence map instead of a
+# single HSV threshold. The pieces:
+#
+#   D1  strong-black:        v < V_STRONG, hue/sat irrelevant     (weight 1.0)
+#   D2  low-saturation dark: s < S_LOW AND v < adaptive Otsu       (weight 0.7)
+#   D3  edge-supported:      v < V_EDGE_DARK AND grad > G_MIN      (weight 0.4)
+#   D4  CC filter:           drop tiny / non-elongated components (suppression)
+#
+# The detectors are fused via element-wise max into a continuous 0.0-1.0
+# evidence map, which is then thresholded back to binary via Otsu on the
+# non-zero portion of the histogram. The binary mask is what the rest of
+# the pipeline still consumes — wall_evidence is a side channel for future
+# scoring work (step 4).
+#
+# Set the env var WALL_EVIDENCE_DEBUG_DIR=/path/to/dir to dump
+# per-detector intermediates as PNGs when segment_colors() runs.
 
-def segment_colors(bgr: np.ndarray) -> Dict[str, np.ndarray]:
-    """Return {label: uint8 mask} for wall/window/door.
+WALL_EVIDENCE_V_STRONG = 80
+WALL_EVIDENCE_S_LOW = 40
+WALL_EVIDENCE_OTSU_CAP = 160
+WALL_EVIDENCE_DARK_FRAC_MIN = 0.02
+WALL_EVIDENCE_EDGE_V_MAX = 140
+WALL_EVIDENCE_EDGE_GRAD_MIN = 30.0
+WALL_EVIDENCE_D1_WEIGHT = 1.0
+WALL_EVIDENCE_D2_WEIGHT = 0.7
+WALL_EVIDENCE_D3_WEIGHT = 0.4
+WALL_EVIDENCE_PRE_BINARY_THR = 0.3   # threshold used only by the CC filter
+WALL_EVIDENCE_CC_KEEP_AREA = 40      # area >= this → keep regardless of shape
+WALL_EVIDENCE_CC_MIN_AREA = 4        # smaller than this → always drop
+WALL_EVIDENCE_CC_MIN_ASPECT = 2.0    # below KEEP_AREA, require this aspect
 
-    Anti-aliased edge pixels are absorbed by morphological closing on each
-    mask, so the resulting binary image has no pinholes or fringe noise.
+
+def _wall_chromatic_mask(hsv: np.ndarray) -> np.ndarray:
+    """Boolean (h, w) mask of pixels that are chromatic (door / window).
+
+    Used to suppress wall evidence where the pixel is clearly a colored
+    feature, since the anti-aliased dark fringe of a colored stroke would
+    otherwise leak into the wall channel.
+    """
+    window = cv2.inRange(hsv, (90, 80, 80), (135, 255, 255))
+    door = cv2.inRange(hsv, (18, 80, 80), (38, 255, 255))
+    return (window > 0) | (door > 0)
+
+
+def compute_wall_evidence(bgr: np.ndarray,
+                          debug: Dict[str, np.ndarray] | None = None
+                          ) -> np.ndarray:
+    """Return a continuous wall-evidence map in [0.0, 1.0] of shape (h, w).
+
+    If ``debug`` is provided, intermediate per-detector layers are stashed
+    in it for later inspection.
     """
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
+    chromatic = _wall_chromatic_mask(hsv)
 
-    # Black wall: union of two detectors so we catch both pure black walls and
-    # faded grey outlines (e.g. exterior shells in sg2.png).
-    #   strong: very low value, hue/sat irrelevant.
-    #   faint:  low-saturation pixel that's clearly darker than the page
-    #           background. The faint detector only fires when there's a real
-    #           bimodal V distribution in the low-sat region; otherwise text
-    #           anti-aliasing on a white page leaks in and gets skeletonized
-    #           into spurious segments.
-    strong_wall = (v < 80)
-    low_sat = s < 40
-    faint_wall = np.zeros_like(strong_wall)
+    # D1: strong black.
+    d1 = (v < WALL_EVIDENCE_V_STRONG).astype(np.float32) * WALL_EVIDENCE_D1_WEIGHT
+
+    # D2: low-saturation dark with adaptive Otsu.
+    d2 = np.zeros_like(d1)
+    low_sat = (s < WALL_EVIDENCE_S_LOW)
     if low_sat.any():
         v_lowsat = v[low_sat]
         otsu_thr, _ = cv2.threshold(v_lowsat, 0, 255,
                                     cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # Two guards against false positives:
-        #   1. Hard cap at 160 — anything brighter is page background, not wall.
-        #   2. The dark cluster must be a meaningful share of low-sat pixels.
-        #      On a mostly-white page with only black text, the dark side is
-        #      <1% and Otsu's cutoff sits in the anti-alias ramp; ignore it.
         dark_frac = float((v_lowsat < otsu_thr).sum()) / float(v_lowsat.size)
-        if otsu_thr <= 160 and dark_frac >= 0.02:
-            faint_wall = low_sat & (v < otsu_thr)
-    wall = (strong_wall | faint_wall).astype(np.uint8) * 255
+        if (otsu_thr <= WALL_EVIDENCE_OTSU_CAP
+                and dark_frac >= WALL_EVIDENCE_DARK_FRAC_MIN):
+            d2 = (low_sat & (v < otsu_thr)).astype(np.float32) * WALL_EVIDENCE_D2_WEIGHT
 
-    # Blue window: hue ~ 100-130 in OpenCV's 0-179 scale, saturation/value high.
+    # D3: edge-supported dark stroke. Sobel magnitude on V channel.
+    gx = cv2.Sobel(v, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(v, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = cv2.magnitude(gx, gy)
+    d3 = (((v < WALL_EVIDENCE_EDGE_V_MAX)
+           & (grad_mag > WALL_EVIDENCE_EDGE_GRAD_MIN))
+          .astype(np.float32) * WALL_EVIDENCE_D3_WEIGHT)
+
+    # Fuse via element-wise max.
+    evidence = np.maximum.reduce([d1, d2, d3])
+    evidence[chromatic] = 0.0
+
+    # D4: connected-component shape filter. Drop blobs that are too small
+    # to be wall (likely page noise) or small + non-elongated (likely text
+    # characters / dots).
+    binary_pre = (evidence > WALL_EVIDENCE_PRE_BINARY_THR).astype(np.uint8)
+    if binary_pre.any():
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(binary_pre, connectivity=8)
+        keep = np.ones(n, dtype=bool)
+        keep[0] = True  # background label, value irrelevant
+        for lab in range(1, n):
+            area = int(stats[lab, cv2.CC_STAT_AREA])
+            bw = int(stats[lab, cv2.CC_STAT_WIDTH])
+            bh = int(stats[lab, cv2.CC_STAT_HEIGHT])
+            aspect = max(bw, bh) / max(min(bw, bh), 1)
+            if area >= WALL_EVIDENCE_CC_KEEP_AREA:
+                keep[lab] = True
+            elif (area >= WALL_EVIDENCE_CC_MIN_AREA
+                  and aspect >= WALL_EVIDENCE_CC_MIN_ASPECT):
+                keep[lab] = True
+            else:
+                keep[lab] = False
+        if not keep.all():
+            keep_mask = keep[labels]
+            evidence = evidence * keep_mask.astype(np.float32)
+
+    if debug is not None:
+        debug["d1_strong_black"] = (d1 > 0).astype(np.uint8) * 255
+        debug["d2_low_sat_dark"] = (d2 > 0).astype(np.uint8) * 255
+        debug["d3_edge_supported"] = (d3 > 0).astype(np.uint8) * 255
+        debug["chromatic"] = chromatic.astype(np.uint8) * 255
+        debug["evidence"] = (np.clip(evidence, 0.0, 1.0) * 255).astype(np.uint8)
+    return evidence
+
+
+WALL_EVIDENCE_BINARY_THR = 0.5       # output binary at this evidence level
+
+
+def evidence_to_binary(evidence: np.ndarray) -> np.ndarray:
+    """Threshold a 0.0-1.0 evidence map to a 0/255 uint8 mask.
+
+    The cutoff is fixed at 0.5 rather than computed via Otsu. With three
+    discrete detector weights (D1=1.0, D2=0.7, D3=0.4):
+
+      - 0.5 admits the same pixels as the old ``D1 | D2`` union: D1 and D2
+        both sit above 0.5; D3 alone does not promote a pixel to wall.
+      - D3 (edge-supported dark stroke) is still computed and contributes
+        to the continuous evidence map, where step 4's candidate scoring
+        can weigh it without binary commit.
+      - Otsu was tried first and rejected: with three discrete weights and
+        a near-empty background, Otsu's two-class split lands near 0.7 on
+        clean images and silently drops D2 pixels — losing faint exterior
+        walls the previous code caught. The earlier 0.3 cutoff was tried
+        next but admitted D3, which fires on the dark anti-aliased fringe
+        immediately outside chromatic strokes and tanked window IOU.
+    """
+    if evidence.size == 0 or evidence.max() <= 0.0:
+        return np.zeros(evidence.shape, dtype=np.uint8)
+    return ((evidence > WALL_EVIDENCE_BINARY_THR).astype(np.uint8)) * 255
+
+
+def segment_colors(bgr: np.ndarray) -> Dict[str, np.ndarray]:
+    """Return {label: uint8 mask} for wall/window/door.
+
+    Wall comes from the multi-detector evidence path; window / door are
+    direct HSV inRange. Anti-aliased edge pixels are absorbed by a small
+    morphological closing on each output mask.
+    """
+    debug_dir = os.environ.get("WALL_EVIDENCE_DEBUG_DIR")
+    debug: Dict[str, np.ndarray] | None = {} if debug_dir else None
+
+    evidence = compute_wall_evidence(bgr, debug=debug)
+    wall = evidence_to_binary(evidence)
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     window = cv2.inRange(hsv, (90, 80, 80), (135, 255, 255))
-
-    # Yellow door: hue ~ 20-35.
     door = cv2.inRange(hsv, (18, 80, 80), (38, 255, 255))
 
-    # Suppress overlap: a pixel that triggered a chromatic mask must not
-    # also count as wall (anti-aliased dark fringe of a colored stroke).
+    # Belt-and-braces chromatic suppression after thresholding — closing
+    # below could otherwise dilate wall into anti-aliased chromatic fringe.
     chromatic = cv2.bitwise_or(window, door)
     wall = cv2.bitwise_and(wall, cv2.bitwise_not(chromatic))
 
-    # Tiny closing to bridge anti-alias gaps at line edges before skeletonization.
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     masks = {}
     for name, m in (("wall", wall), ("window", window), ("door", door)):
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=1)
         masks[name] = m
+
+    if debug is not None:
+        os.makedirs(debug_dir, exist_ok=True)
+        debug["wall_final"] = masks["wall"]
+        debug["window"] = masks["window"]
+        debug["door"] = masks["door"]
+        for name, layer in debug.items():
+            cv2.imwrite(os.path.join(debug_dir, f"{name}.png"), layer)
     return masks
 
 
