@@ -5,9 +5,61 @@
 
 ---
 
+## 進度狀態（2026-05-11 收工）
+
+| Step | 名稱 | 狀態 | 備註 |
+|---|---|---|---|
+| 0 | Regression Harness | ✅ 完成 | [regression.py](regression.py) + tests/baseline/、tests/cases/、tests/README.md |
+| 1 | 刪 NO-OP pass | ✅ 完成 | 砍 6 個（ablation 預測 7 個，1 個其實非 NO-OP 留下） |
+| 2 | door/window CC + bbox | ❌ 試 + revert | bbox 中線跟 skeleton 不重合，下游 snap pipeline 被推歪、sg2 上方有錯誤 T-junction。改回 skeleton path。`door_window_to_segments` 函式已從 source 移除（git history 找回） |
+| 3 | wall multi-evidence | ✅ 完成 | `compute_wall_evidence` D1+D2+D3 + D4 CC filter；fixed threshold 0.5 |
+| 4.1 | score 函數 | ✅ 完成 | [scoring.py](scoring.py) — 4 primary + 6 derived terms |
+| 4.2-4.4 | 3 個 gates | ✅ 完成 | [candidates.py](candidates.py) — `SpatialGate` / `is_legal` / `mask_support_along` |
+| 4.5a-e | 5 高風險 pass candidate 化 | ✅ 完成 | 每個 pass 一個 commit；每改一個跑 regression |
+| 4.6 | macro-candidate | ⚠️ 改成 predictive | 原計畫：寫 `extend_then_snap` 等 macro。實作後發現 macro 的 remove+add 跟 `apply_candidate` 的 batch-accept 衝突（index shift），改用 score 加 `pseudo_junction` term（loose endpoint 在 wall body interior 算半個 junction）達成同樣效果。**沒寫 macro candidate** |
+| 4.7 | （todo 沒列）proximal_bridge_generator + junction-aware merge | ✅ 完成 | [generators.py](generators.py) — 對任意 wall endpoint pair 提案 axis-bridge / L-bridge；`manhattan_ultimate_merge` 加 junction-aware（不再吃掉 T-junction）。free endpoint 在 source 24→11、sg2 44→22 |
+| 4.8 | （todo 沒列）pass 折疊 + dead code 清理 | ✅ 完成 | 砍掉 8 個重複/NO-OP call（mask_gated_l_extend, manhattan_merge ×3, extend_to_intersect, extend_trunk_to_loose, force_close_free_l_corners, prune_tails）；刪 11 個 dead-code 函式（1339 行）；ablation.py 重新 sync |
+| 5 | scoring + ranking model | ❌ 未開始 | 需要 30-50 張人工標註的 floorplan 才能訓練；跨 session 工作 |
+
+**Pipeline call site 變化**：31（起始估算）→ **17**（−45%）
+
+**Regression 狀態（收工）**：
+- source: PASS bit-identical
+- sg2: PASS bit-identical（前後共更新 baseline 5 次：step 2, step 3, step 4.5a, step 4.5e, step 4.6, step 4.7, step 4.8。最近一次 user-approved option A，threshold 不放寬）
+- Gemini_Generated: **skip=true**（manifest 設定）。step 4.7-4.8 之後輸出跟 step 2 era baseline 大幅漂移（free 54→35 改善了、但 wall IOU 0.69 表示位置漂得多），未做視覺確認 + baseline update
+
+**新模組**（todo 沒列、實際產生）：
+- [scoring.py](scoring.py) — score 函數
+- [candidates.py](candidates.py) — `Candidate` / `SpatialGate` / 三個 gates
+- [generators.py](generators.py) — `proximal_bridge_candidates`（axis-bridge + L-bridge + safe-mutate）
+
+**Memory（給未來 session）**：
+- `feedback_no_git_push.md` — user 嚴禁 push，不要嘗試
+- `feedback_baseline_update_protocol.md` — baseline 更新前必須先給用戶看 overlay 並明確徵詢，不要用 `--yes` 自動更新
+- `project_step2_baseline_shift.md` — step 2 漂移歷史記錄（step 2 後來被 revert，這份 memory 部分過時）
+
+**接下來什麼最該做**：
+
+| 選項 | 評估 |
+|---|---|
+| **step 5** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註，不是寫程式 |
+| collapse_collinear_walls_generator | 再 −1 call site；純架構；非緊迫，建議 step 5 後再評估 |
+| 把 `door_window_to_segments` 從 git history 拿回來重做 step 2 | 不建議（skeleton path 已驗證對 source/sg2 topology 是對的） |
+| Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定 |
+
+**容易踩的雷（從這次經驗加上的）**：
+- `apply_candidate` 的 remove+add 跟 batch accept loop 有 index-shift 衝突——這是 macro candidate 不能直接做的根因。要做的話需要 single-accept-then-regenerate 模式
+- `manhattan_ultimate_merge` 過去會吃掉 T-junction（兩條 collinear segments 之間如果有別的 segment endpoint 也會被合併），junction-aware merge 修這個——這是 free endpoint 大幅下降的真正原因
+- baseline 不要自動更新；每次都先給用戶看 overlay
+- regression PASS bit-identical 是真正的「沒副作用」；hash-changed-IOU-pass 還是有結構性變化，仍需用戶批准
+
+---
+
 ## 給接手的 Claude（新 session 必讀）
 
 這份 todo.md 是 2026-05-11 的設計討論結論。如果你是新 session 的 Claude（或人類換電腦 git pull 後接手），請**先讀完本節再開工**，否則你會錯失關鍵決策邏輯。
+
+**⚠️ 上方「進度狀態」反映實際完成狀況；下方內容是原始計畫，部分跟實作有出入（見 step 2 / 4.6 備註）。**
 
 ### 環境
 
