@@ -1418,41 +1418,106 @@ def manhattan_t_project(segments: List[Dict], tol: float) -> List[Dict]:
 def manhattan_ultimate_merge(segments: List[Dict]) -> List[Dict]:
     """Step 4: union same-type segments that lie on the exact same line and
     whose extents touch or overlap — fuse into the smallest set of longest
-    spans. Uses exact float equality on the line coordinate (which is safe
-    after the Manhattan stage because every line value comes from a single
-    canonical source — a participating wall's x or y — never an average).
+    spans, **but only when doing so does not destroy a T-junction**.
+
+    Junction-aware merge rule:
+      Two same-type collinear spans A=[lo_a, hi_a] and B=[lo_b, hi_b]
+      (with hi_a ≥ lo_b after sorting) are merged unless the would-be
+      interior coordinate is also an endpoint of any segment outside this
+      bucket (a different-axis or different-type segment that terminates
+      there). If that other segment exists, merging the two pieces would
+      collapse the touch point from an explicit node into a body interior,
+      and the foreign segment would become a "deferred T-junction"
+      (degree-1 endpoint sitting on a body) instead of a real degree-3
+      junction. Keeping the two pieces separate preserves the explicit
+      junction in the node graph.
+
+    For the canonical case our pipeline produces — Manhattan-routed
+    geometry where line coordinates come from a single canonical source —
+    the floats compare exact-equal, so endpoint-coordinate matching is
+    safe. (We still apply a coarse 0.01-px quantisation for robustness
+    against any future caller passing through ordinary float arithmetic.)
     """
-    out: List[Dict] = []
     # Bucket horizontals by (type, y), verticals by (type, x).
     h_buckets: Dict[Tuple[str, float], List[Tuple[float, float]]] = defaultdict(list)
     v_buckets: Dict[Tuple[str, float], List[Tuple[float, float]]] = defaultdict(list)
     for s in segments:
-        if _seg_axis_strict(s) == "h":
+        ax = _seg_axis_strict(s)
+        if ax == "h":
             lo, hi = sorted((s["x1"], s["x2"]))
             h_buckets[(s["type"], s["y1"])].append((lo, hi))
-        else:
+        elif ax == "v":
             lo, hi = sorted((s["y1"], s["y2"]))
             v_buckets[(s["type"], s["x1"])].append((lo, hi))
 
-    def _union(spans: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    # Endpoint occurrence counter across the whole input — used to detect
+    # when a span boundary is also touched by an external segment.
+    endpoint_count: Dict[Tuple[int, int], int] = defaultdict(int)
+    _Q = 100  # 0.01-px quantisation grid
+
+    def _qk(x: float, y: float) -> Tuple[int, int]:
+        return (int(round(x * _Q)), int(round(y * _Q)))
+
+    for s in segments:
+        endpoint_count[_qk(s["x1"], s["y1"])] += 1
+        endpoint_count[_qk(s["x2"], s["y2"])] += 1
+
+    def _is_external(point: float, axis_value: float, axis_kind: str,
+                     own_contribution: int) -> bool:
+        """True iff the endpoint at (point, axis_value) for H (or
+        (axis_value, point) for V) is shared with at least one segment
+        outside the bucket currently being merged. ``own_contribution``
+        is the number of bucket-internal endpoints we know are at this
+        coordinate (1 for one-sided overlap, 2 for an exact touch).
+        """
+        if axis_kind == "h":
+            k = _qk(point, axis_value)
+        else:
+            k = _qk(axis_value, point)
+        return endpoint_count.get(k, 0) > own_contribution
+
+    def _union_junction_aware(spans: List[Tuple[float, float]],
+                               axis_value: float, axis_kind: str
+                               ) -> List[Tuple[float, float]]:
         if not spans:
             return []
         spans = sorted(spans)
         merged = [spans[0]]
         for lo, hi in spans[1:]:
             cur_lo, cur_hi = merged[-1]
-            if lo <= cur_hi:
-                merged[-1] = (cur_lo, max(cur_hi, hi))
-            else:
+            if lo > cur_hi:
                 merged.append((lo, hi))
+                continue
+            # Spans overlap or touch — decide merge.
+            block = False
+            if abs(lo - cur_hi) < 1e-6:
+                # Exact touch at point cur_hi. Two bucket-internal endpoints
+                # contribute (cur's hi and new's lo) → own_contribution=2.
+                if _is_external(cur_hi, axis_value, axis_kind, 2):
+                    block = True
+            else:
+                # Overlap: cur_hi (cur's hi) and lo (new's lo) are at
+                # different coords. Each gets one bucket-internal
+                # endpoint contribution. If either coincides with an
+                # external endpoint, merging would absorb that junction
+                # into a body interior.
+                if _is_external(cur_hi, axis_value, axis_kind, 1):
+                    block = True
+                elif _is_external(lo, axis_value, axis_kind, 1):
+                    block = True
+            if block:
+                merged.append((lo, hi))
+            else:
+                merged[-1] = (cur_lo, max(cur_hi, hi))
         return merged
 
+    out: List[Dict] = []
     for (t, y), spans in h_buckets.items():
-        for lo, hi in _union(spans):
+        for lo, hi in _union_junction_aware(spans, y, "h"):
             if hi > lo:
                 out.append({"type": t, "x1": lo, "y1": y, "x2": hi, "y2": y})
     for (t, x), spans in v_buckets.items():
-        for lo, hi in _union(spans):
+        for lo, hi in _union_junction_aware(spans, x, "v"):
             if hi > lo:
                 out.append({"type": t, "x1": x, "y1": lo, "x2": x, "y2": hi})
     return out
@@ -2418,6 +2483,75 @@ def _brute_force_ray_extend_legacy(lines: List[Dict],
 # its preparatory job; the score still rejects snaps that *worsen* other
 # terms (e.g. invalid_crossing, phantom).
 BRUTE_FORCE_MIN_ACCEPT_DELTA = -1e-6
+
+
+def _accept_bridge_candidates(lines: List[Dict],
+                               *,
+                               max_radius: float,
+                               wall_mask: np.ndarray = None,
+                               wall_evidence: np.ndarray = None,
+                               door_mask: np.ndarray = None,
+                               window_mask: np.ndarray = None,
+                               ) -> List[Dict]:
+    """Run ``generators.proximal_bridge_candidates`` and accept those whose
+    pipeline-score delta is strictly positive.
+
+    Returns the new segments list (the input is *not* mutated in place).
+
+    Acceptance order: shorter bridges first, then higher-mask-support
+    first. Greedy: once a pair of endpoints has been bridged, both source
+    endpoints are locked from being re-used by another bridge in the
+    same call. Subsequent candidates that reference a locked endpoint
+    are skipped — the next outer call (if any) regenerates.
+    """
+    import candidates as C
+    import generators as G
+    import scoring as S
+
+    if not lines:
+        return list(lines)
+    if wall_mask is None:
+        return list(lines)
+
+    # Use the binary wall mask as a float evidence map fallback when the
+    # caller didn't supply a continuous one. Keeps wall_evidence_integral
+    # interpretable as "fraction of pixels on mask".
+    if wall_evidence is None:
+        wall_evidence = (wall_mask > 0).astype(np.float32)
+
+    cands = G.proximal_bridge_candidates(
+        lines, wall_mask=wall_mask, max_radius=max_radius)
+    if not cands:
+        return list(lines)
+
+    # Shorter bridges (less wall invented) first, then higher mask support.
+    cands.sort(key=lambda c: (c.meta["total_len"], -c.meta["min_support_observed"]))
+
+    current = list(lines)
+    base_score = S.compute_score(current,
+                                 wall_evidence=wall_evidence,
+                                 door_mask=door_mask,
+                                 window_mask=window_mask)
+    used_endpoints: set = set()
+
+    for cand in cands:
+        ea, eb = cand.meta["pair_endpoints"]
+        ka = (int(round(ea[0])), int(round(ea[1])))
+        kb = (int(round(eb[0])), int(round(eb[1])))
+        if ka in used_endpoints or kb in used_endpoints:
+            continue
+        trial = C.apply_candidate(current, cand)
+        trial_score = S.compute_score(trial,
+                                      wall_evidence=wall_evidence,
+                                      door_mask=door_mask,
+                                      window_mask=window_mask)
+        delta = trial_score.total - base_score.total
+        if delta > CANDIDATE_MIN_ACCEPT_DELTA:
+            current = trial
+            base_score = trial_score
+            used_endpoints.add(ka)
+            used_endpoints.add(kb)
+    return current
 
 
 def brute_force_ray_extend(lines: List[Dict],
@@ -3768,6 +3902,23 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     insert_missing_connectors(snapped, colinear_loose,
                               connector_max,
                               wall_mask=masks.get("wall"))
+    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # Proximal bridge generator: for any pair of wall endpoints within
+    # ``l_ext_asym`` × scale of each other that aren't already coincident,
+    # propose either a 1-seg axis-bridge (when endpoints share a near-axis)
+    # or a 2-seg L-bridge (when they're offset on both axes). Subsumes
+    # ``insert_missing_connectors``' loose-endpoint axis-bridge case and
+    # extends it to the degree-2-corner L-bridge case that no earlier
+    # pass addressed. Score-and-accept gates ensure no candidate is taken
+    # that worsens total geometry quality.
+    snapped = _accept_bridge_candidates(
+        snapped,
+        max_radius=l_ext_asym,
+        wall_mask=masks.get("wall"),
+        wall_evidence=None,  # falls back to (wall_mask>0) as float32
+        door_mask=masks.get("door"),
+        window_mask=masks.get("window"),
+    )
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Final 2-px endpoint fusion: snap any near-coincident endpoints to one
     # canonical (wall-priority) coordinate so micro-deltas vanish.
