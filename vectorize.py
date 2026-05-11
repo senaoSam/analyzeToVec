@@ -3851,8 +3851,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     s6 = manhattan_intersection_snap(s6, manhattan_tol)
     # (c) T-junction projection onto orthogonal trunks.
     s6 = manhattan_t_project(s6, manhattan_tol)
-    # (d) Ultimate collinear merge.
-    s6 = manhattan_ultimate_merge(s6)
+    # (d) Ultimate collinear merge: post-step-4.7 ablation confirmed this
+    #     first manhattan_ultimate_merge call is NO-OP after the upstream
+    #     passes had their inputs unchanged by step 4 / 4.6 / 4.7 — the
+    #     real merge work happens at lines below (post-watertight and
+    #     post-gap-closing). Call removed.
 
     # --- WATERTIGHT CLOSURE (kill duplicates + close gaps) --------------
     s7 = cluster_parallel_duplicates(s6, parallel_merge)
@@ -3884,12 +3887,13 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # contribute two endpoints at the same coordinate, falsely raising the
     # degree of that point.
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # Trunk extension: a loose endpoint near an orthogonal trunk's line
-    # but past its body extends the trunk to reach the joint.  The masks
-    # gate keeps the extension from sweeping through white space.
-    extend_trunk_to_loose(snapped, trunk_perp, trunk_gap,
-                          masks=masks)
-    snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # extend_trunk_to_loose (trunk auto-extension toward a loose endpoint)
+    # used to run here. Post-step-4.7 ablation showed it became NO-OP on
+    # all 3 regression images: the same trunk-extension work is now
+    # handled atomically by proximal_bridge_generator (its L-bridge case
+    # emits a 2-seg bridge whose downstream junction-aware merge folds
+    # into the host trunk, producing the same extended-trunk result that
+    # this pass used to perform via mutate). Call removed.
     # mask_gated_l_extend (asymmetric L-corner closure via endpoint
     # mutation) used to run here. Subsumed by ``proximal_bridge_generator``
     # below: the bridge generator proposes an *add-L-bridge* candidate for
