@@ -2541,7 +2541,9 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # --- WATERTIGHT CLOSURE (kill duplicates + close gaps) --------------
     s7 = cluster_parallel_duplicates(s6, parallel_merge)
     s7 = grid_snap_endpoints(s7, grid_snap)
-    s7 = manhattan_ultimate_merge(s7)
+    # manhattan_ultimate_merge (post-watertight) removed step 4.8 cleanup:
+    # latest ablation shows it as NO-OP across all 3 images now that the
+    # final merge at the end of the pipeline is junction-aware.
 
     # --- ULTIMATE GAP CLOSING (degree-1 carpet bombing) -----------------
     # (1) force_close_free_l_corners (force-close pairs of free L-corners
@@ -2556,7 +2558,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #     past a trunk's body within tol triggers an extension of the trunk.
     #     The masks gate prevents extending through white space.
     s8 = t_snap_with_extension(s7, gap_close, masks=masks)
-    s8 = manhattan_ultimate_merge(s8)
+    # manhattan_ultimate_merge (post-gap-closing) removed step 4.8: NO-OP
+    # in latest ablation.
 
     snapped = s8
 
