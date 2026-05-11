@@ -1,82 +1,82 @@
 pass,pass_desc,image,baseline_n,ablated_n,delta_n,baseline_free,ablated_free,delta_free,diag,wall_support,baseline_wall_support,iou_vs_baseline,n_wall,n_window,n_door
-axis_align,Step 4a: axis_align_segments,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-axis_align,Step 4a: axis_align_segments,sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,0.996,70,13,15
-axis_align,Step 4a: axis_align_segments,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-snap_colinear,Step 4b: snap_colinear_coords (pass 1),source.png,89,79,-10,26,25,-1,0,0.8207,0.8859,0.6605,50,14,15
-snap_colinear,Step 4b: snap_colinear_coords (pass 1),sg2.png,98,93,-5,42,46,4,0,0.7336,0.7163,0.446,65,13,15
-snap_colinear,Step 4b: snap_colinear_coords (pass 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,79,4,48,51,3,0,0.7989,0.7533,0.2843,56,8,15
-merge_collin_1,"Step 4c: merge_collinear (pass 1, pre-T/L)",source.png,89,89,0,26,26,0,0,0.8984,0.8859,0.9303,58,16,15
-merge_collin_1,"Step 4c: merge_collinear (pass 1, pre-T/L)",sg2.png,98,98,0,42,41,-1,0,0.7437,0.7163,0.9289,70,13,15
-merge_collin_1,"Step 4c: merge_collinear (pass 1, pre-T/L)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,77,2,48,45,-3,0,0.7412,0.7533,0.6662,52,8,17
-t_junction_snap,Step 4d: t_junction_snap,source.png,89,83,-6,26,25,-1,0,0.8872,0.8859,0.948,54,14,15
-t_junction_snap,Step 4d: t_junction_snap,sg2.png,98,94,-4,42,47,5,0,0.7291,0.7163,0.8428,66,13,15
-t_junction_snap,Step 4d: t_junction_snap,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,47,-1,0,0.7532,0.7533,0.6873,52,7,16
-extend_to_intersect,Step 4d: extend_to_intersect,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-extend_to_intersect,Step 4d: extend_to_intersect,sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-extend_to_intersect,Step 4d: extend_to_intersect,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,49,1,0,0.7522,0.7533,0.9991,51,7,17
-truncate_overshoots,Step 4d: truncate_overshoots,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-truncate_overshoots,Step 4d: truncate_overshoots,sg2.png,98,98,0,42,42,0,0,0.7161,0.7163,0.9395,70,13,15
-truncate_overshoots,Step 4d: truncate_overshoots,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,76,1,48,48,0,0,0.7528,0.7533,0.9811,52,7,17
-merge_collin_2,"Step 4d: merge_collinear (pass 2, post T/L)",source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-merge_collin_2,"Step 4d: merge_collinear (pass 2, post T/L)",sg2.png,98,97,-1,42,42,0,0,0.7359,0.7163,0.9668,69,13,15
-merge_collin_2,"Step 4d: merge_collinear (pass 2, post T/L)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7535,0.7533,1.0,51,7,17
-snap_endpoints_1,"Step 4: snap_endpoints (pass 1, post T/L)",source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-snap_endpoints_1,"Step 4: snap_endpoints (pass 1, post T/L)",sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-snap_endpoints_1,"Step 4: snap_endpoints (pass 1, post T/L)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,0.9817,51,7,17
-prune_tails,Step 4e: prune_tails,source.png,89,88,-1,26,26,0,0,0.8854,0.8859,1.0,57,16,15
-prune_tails,Step 4e: prune_tails,sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-prune_tails,Step 4e: prune_tails,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,50,2,0,0.7575,0.7533,0.9827,51,7,17
-snap_endpoints_2,"Step 4e: snap_endpoints (pass 2, post-prune)",source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-snap_endpoints_2,"Step 4e: snap_endpoints (pass 2, post-prune)",sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-snap_endpoints_2,"Step 4e: snap_endpoints (pass 2, post-prune)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-manhattan_force_axis,Step 4f-a: manhattan_force_axis,source.png,89,89,0,26,28,2,0,0.8995,0.8859,0.9014,59,16,14
-manhattan_force_axis,Step 4f-a: manhattan_force_axis,sg2.png,98,95,-3,42,46,4,0,0.7596,0.7163,0.7673,67,13,15
-manhattan_force_axis,Step 4f-a: manhattan_force_axis,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,68,-7,48,51,3,0,0.7747,0.7533,0.7863,51,6,11
-manhattan_isect_snap,Step 4f-b: manhattan_intersection_snap (x2),source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-manhattan_isect_snap,Step 4f-b: manhattan_intersection_snap (x2),sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-manhattan_isect_snap,Step 4f-b: manhattan_intersection_snap (x2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-manhattan_t_project,Step 4f-c: manhattan_t_project,source.png,89,89,0,26,26,0,0,0.855,0.8859,0.9648,58,16,15
-manhattan_t_project,Step 4f-c: manhattan_t_project,sg2.png,98,98,0,42,42,0,0,0.7162,0.7163,0.9894,70,13,15
-manhattan_t_project,Step 4f-c: manhattan_t_project,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,76,1,48,47,-1,0,0.7537,0.7533,0.9902,52,7,17
-manhattan_merge_1,Step 4f-d: manhattan_ultimate_merge (post-Manhattan),source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-manhattan_merge_1,Step 4f-d: manhattan_ultimate_merge (post-Manhattan),sg2.png,98,98,0,42,42,0,0,0.7066,0.7163,0.9897,70,13,15
-manhattan_merge_1,Step 4f-d: manhattan_ultimate_merge (post-Manhattan),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-cluster_parallel,Step 4g: cluster_parallel_duplicates,source.png,89,98,9,26,28,2,0,0.9008,0.8859,0.8248,67,16,15
-cluster_parallel,Step 4g: cluster_parallel_duplicates,sg2.png,98,109,11,42,56,14,0,0.7394,0.7163,0.6974,81,13,15
-cluster_parallel,Step 4g: cluster_parallel_duplicates,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,82,7,48,50,2,0,0.7186,0.7533,0.6754,58,7,17
-grid_snap_1,Step 4g: grid_snap_endpoints (pass 1),source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-grid_snap_1,Step 4g: grid_snap_endpoints (pass 1),sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-grid_snap_1,Step 4g: grid_snap_endpoints (pass 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-force_l_corner,Step 4g: force_l_corner_closure,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-force_l_corner,Step 4g: force_l_corner_closure,sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-force_l_corner,Step 4g: force_l_corner_closure,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-grid_snap_2,Step 4g: grid_snap_endpoints (pass 2),source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-grid_snap_2,Step 4g: grid_snap_endpoints (pass 2),sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-grid_snap_2,Step 4g: grid_snap_endpoints (pass 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,76,1,48,47,-1,0,0.7538,0.7533,0.9904,52,7,17
-force_close_free_l_1,Step 4h: force_close_free_l_corners (pass 1),source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-force_close_free_l_1,Step 4h: force_close_free_l_corners (pass 1),sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-force_close_free_l_1,Step 4h: force_close_free_l_corners (pass 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-t_snap_with_extension,Step 4h: t_snap_with_extension,source.png,89,92,3,26,28,2,0,0.8871,0.8859,0.9927,61,16,15
-t_snap_with_extension,Step 4h: t_snap_with_extension,sg2.png,98,99,1,42,44,2,0,0.7169,0.7163,0.9983,71,13,15
-t_snap_with_extension,Step 4h: t_snap_with_extension,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,76,1,48,47,-1,0,0.7537,0.7533,0.9988,52,7,17
-force_close_free_l_2,Step 4h: force_close_free_l_corners (pass 2),source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-force_close_free_l_2,Step 4h: force_close_free_l_corners (pass 2),sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-force_close_free_l_2,Step 4h: force_close_free_l_corners (pass 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-final_polish_tails,Step 4h: final_polish_short_tails,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-final_polish_tails,Step 4h: final_polish_short_tails,sg2.png,98,98,0,42,42,0,0,0.7163,0.7163,1.0,70,13,15
-final_polish_tails,Step 4h: final_polish_short_tails,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-brute_force_ray,Step 4i: brute_force_ray_extend,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-brute_force_ray,Step 4i: brute_force_ray_extend,sg2.png,98,98,0,42,53,11,0,0.7175,0.7163,0.9971,70,13,15
-brute_force_ray,Step 4i: brute_force_ray_extend,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,77,2,48,59,11,0,0.7679,0.7533,0.8593,53,7,17
-extend_trunk_to_loose,Step 4i: extend_trunk_to_loose,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-extend_trunk_to_loose,Step 4i: extend_trunk_to_loose,sg2.png,98,98,0,42,43,1,0,0.7164,0.7163,1.0,70,13,15
-extend_trunk_to_loose,Step 4i: extend_trunk_to_loose,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-mask_gated_l_extend,Step 4i: mask_gated_l_extend,source.png,89,89,0,26,26,0,0,0.8859,0.8859,1.0,58,16,15
-mask_gated_l_extend,Step 4i: mask_gated_l_extend,sg2.png,98,98,0,42,41,-1,0,0.7152,0.7163,0.9966,70,13,15
-mask_gated_l_extend,Step 4i: mask_gated_l_extend,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,48,0,0,0.7533,0.7533,1.0,51,7,17
-insert_connectors,Step 4i: insert_missing_connectors,source.png,89,88,-1,26,28,2,0,0.8331,0.8859,0.94,57,16,15
-insert_connectors,Step 4i: insert_missing_connectors,sg2.png,98,99,1,42,44,2,0,0.717,0.7163,1.0,71,13,15
-insert_connectors,Step 4i: insert_missing_connectors,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,48,49,1,0,0.7536,0.7533,0.9512,51,7,17
-fuse_close_endpoints,Step 4i: fuse_close_endpoints,source.png,89,91,2,26,33,7,0,0.8394,0.8859,0.9099,60,16,15
-fuse_close_endpoints,Step 4i: fuse_close_endpoints,sg2.png,98,101,3,42,60,18,0,0.7368,0.7163,0.9295,72,13,16
-fuse_close_endpoints,Step 4i: fuse_close_endpoints,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,80,5,48,71,23,0,0.7631,0.7533,0.8569,55,8,17
+axis_align,Step 4a: axis_align_segments,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+axis_align,Step 4a: axis_align_segments,sg2.png,98,97,-1,44,44,0,0,0.7126,0.7131,0.9868,69,13,15
+axis_align,Step 4a: axis_align_segments,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+snap_colinear,Step 4b: snap_colinear_coords (pass 1),source.png,89,82,-7,26,30,4,0,0.8242,0.8322,0.6714,53,14,15
+snap_colinear,Step 4b: snap_colinear_coords (pass 1),sg2.png,98,98,0,44,47,3,0,0.7359,0.7131,0.4427,70,13,15
+snap_colinear,Step 4b: snap_colinear_coords (pass 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,80,5,50,62,12,0,0.7951,0.7516,0.2915,56,9,15
+merge_collin_1,"Step 4c: merge_collinear (pass 1, pre-T/L)",source.png,89,89,0,26,26,0,0,0.8446,0.8322,0.9303,58,16,15
+merge_collin_1,"Step 4c: merge_collinear (pass 1, pre-T/L)",sg2.png,98,97,-1,44,41,-3,0,0.7403,0.7131,0.9259,69,13,15
+merge_collin_1,"Step 4c: merge_collinear (pass 1, pre-T/L)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,77,2,50,47,-3,0,0.7414,0.7516,0.6967,52,8,17
+t_junction_snap,Step 4d: t_junction_snap,source.png,89,84,-5,26,25,-1,0,0.8369,0.8322,0.9441,55,14,15
+t_junction_snap,Step 4d: t_junction_snap,sg2.png,98,97,-1,44,52,8,0,0.7304,0.7131,0.8415,69,13,15
+t_junction_snap,Step 4d: t_junction_snap,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,74,-1,50,51,1,0,0.7509,0.7516,0.7117,51,7,16
+extend_to_intersect,Step 4d: extend_to_intersect,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+extend_to_intersect,Step 4d: extend_to_intersect,sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+extend_to_intersect,Step 4d: extend_to_intersect,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,76,1,50,53,3,0,0.7527,0.7516,0.9967,52,7,17
+truncate_overshoots,Step 4d: truncate_overshoots,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+truncate_overshoots,Step 4d: truncate_overshoots,sg2.png,98,98,0,44,44,0,0,0.7129,0.7131,0.9395,70,13,15
+truncate_overshoots,Step 4d: truncate_overshoots,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,51,1,0,0.7507,0.7516,0.9801,51,7,17
+merge_collin_2,"Step 4d: merge_collinear (pass 2, post T/L)",source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+merge_collin_2,"Step 4d: merge_collinear (pass 2, post T/L)",sg2.png,98,98,0,44,44,0,0,0.7335,0.7131,0.9668,70,13,15
+merge_collin_2,"Step 4d: merge_collinear (pass 2, post T/L)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+snap_endpoints_1,"Step 4: snap_endpoints (pass 1, post T/L)",source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+snap_endpoints_1,"Step 4: snap_endpoints (pass 1, post T/L)",sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+snap_endpoints_1,"Step 4: snap_endpoints (pass 1, post T/L)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7515,0.7516,0.9736,51,7,17
+prune_tails,Step 4e: prune_tails,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+prune_tails,Step 4e: prune_tails,sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+prune_tails,Step 4e: prune_tails,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,52,2,0,0.7557,0.7516,0.9828,51,7,17
+snap_endpoints_2,"Step 4e: snap_endpoints (pass 2, post-prune)",source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+snap_endpoints_2,"Step 4e: snap_endpoints (pass 2, post-prune)",sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+snap_endpoints_2,"Step 4e: snap_endpoints (pass 2, post-prune)",Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+manhattan_force_axis,Step 4f-a: manhattan_force_axis,source.png,89,89,0,26,28,2,0,0.8457,0.8322,0.9014,59,16,14
+manhattan_force_axis,Step 4f-a: manhattan_force_axis,sg2.png,98,95,-3,44,48,4,0,0.7563,0.7131,0.7674,67,13,15
+manhattan_force_axis,Step 4f-a: manhattan_force_axis,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,67,-8,50,54,4,0,0.7655,0.7516,0.807,49,6,12
+manhattan_isect_snap,Step 4f-b: manhattan_intersection_snap (x2),source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+manhattan_isect_snap,Step 4f-b: manhattan_intersection_snap (x2),sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+manhattan_isect_snap,Step 4f-b: manhattan_intersection_snap (x2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+manhattan_t_project,Step 4f-c: manhattan_t_project,source.png,89,90,1,26,28,2,0,0.8018,0.8322,0.9631,59,16,15
+manhattan_t_project,Step 4f-c: manhattan_t_project,sg2.png,98,98,0,44,44,0,0,0.713,0.7131,0.9894,70,13,15
+manhattan_t_project,Step 4f-c: manhattan_t_project,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7517,0.7516,0.9915,51,7,17
+manhattan_merge_1,Step 4f-d: manhattan_ultimate_merge (post-Manhattan),source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+manhattan_merge_1,Step 4f-d: manhattan_ultimate_merge (post-Manhattan),sg2.png,98,98,0,44,44,0,0,0.7034,0.7131,0.9897,70,13,15
+manhattan_merge_1,Step 4f-d: manhattan_ultimate_merge (post-Manhattan),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+cluster_parallel,Step 4g: cluster_parallel_duplicates,source.png,89,99,10,26,30,4,0,0.9007,0.8322,0.7796,68,16,15
+cluster_parallel,Step 4g: cluster_parallel_duplicates,sg2.png,98,109,11,44,55,11,0,0.736,0.7131,0.698,81,13,15
+cluster_parallel,Step 4g: cluster_parallel_duplicates,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,81,6,50,51,1,0,0.7164,0.7516,0.7112,57,7,17
+grid_snap_1,Step 4g: grid_snap_endpoints (pass 1),source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+grid_snap_1,Step 4g: grid_snap_endpoints (pass 1),sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+grid_snap_1,Step 4g: grid_snap_endpoints (pass 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+force_l_corner,Step 4g: force_l_corner_closure,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+force_l_corner,Step 4g: force_l_corner_closure,sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+force_l_corner,Step 4g: force_l_corner_closure,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+grid_snap_2,Step 4g: grid_snap_endpoints (pass 2),source.png,89,89,0,26,26,0,0,0.8509,0.8322,0.9661,58,16,15
+grid_snap_2,Step 4g: grid_snap_endpoints (pass 2),sg2.png,98,99,1,44,44,0,0,0.7161,0.7131,0.9957,71,13,15
+grid_snap_2,Step 4g: grid_snap_endpoints (pass 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,0.9818,51,7,17
+force_close_free_l_1,Step 4h: force_close_free_l_corners (pass 1),source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+force_close_free_l_1,Step 4h: force_close_free_l_corners (pass 1),sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+force_close_free_l_1,Step 4h: force_close_free_l_corners (pass 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+t_snap_with_extension,Step 4h: t_snap_with_extension,source.png,89,92,3,26,28,2,0,0.8273,0.8322,0.9868,61,16,15
+t_snap_with_extension,Step 4h: t_snap_with_extension,sg2.png,98,99,1,44,47,3,0,0.7145,0.7131,0.9943,71,13,15
+t_snap_with_extension,Step 4h: t_snap_with_extension,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+force_close_free_l_2,Step 4h: force_close_free_l_corners (pass 2),source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+force_close_free_l_2,Step 4h: force_close_free_l_corners (pass 2),sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+force_close_free_l_2,Step 4h: force_close_free_l_corners (pass 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+final_polish_tails,Step 4h: final_polish_short_tails,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+final_polish_tails,Step 4h: final_polish_short_tails,sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+final_polish_tails,Step 4h: final_polish_short_tails,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+brute_force_ray,Step 4i: brute_force_ray_extend,source.png,89,89,0,26,24,-2,0,0.8322,0.8322,0.9975,58,16,15
+brute_force_ray,Step 4i: brute_force_ray_extend,sg2.png,98,98,0,44,56,12,0,0.7102,0.7131,0.9717,70,13,15
+brute_force_ray,Step 4i: brute_force_ray_extend,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,79,4,50,64,14,0,0.7712,0.7516,0.9618,54,8,17
+extend_trunk_to_loose,Step 4i: extend_trunk_to_loose,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+extend_trunk_to_loose,Step 4i: extend_trunk_to_loose,sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+extend_trunk_to_loose,Step 4i: extend_trunk_to_loose,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,74,-1,50,51,1,0,0.7512,0.7516,0.9988,50,7,17
+mask_gated_l_extend,Step 4i: mask_gated_l_extend,source.png,89,89,0,26,26,0,0,0.8322,0.8322,1.0,58,16,15
+mask_gated_l_extend,Step 4i: mask_gated_l_extend,sg2.png,98,98,0,44,44,0,0,0.7131,0.7131,1.0,70,13,15
+mask_gated_l_extend,Step 4i: mask_gated_l_extend,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,75,0,50,50,0,0,0.7516,0.7516,1.0,51,7,17
+insert_connectors,Step 4i: insert_missing_connectors,source.png,89,88,-1,26,28,2,0,0.8331,0.8322,0.9974,57,16,15
+insert_connectors,Step 4i: insert_missing_connectors,sg2.png,98,99,1,44,44,0,0,0.7161,0.7131,0.9957,71,13,15
+insert_connectors,Step 4i: insert_missing_connectors,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,76,1,50,48,-2,0,0.7539,0.7516,1.0,52,7,17
+fuse_close_endpoints,Step 4i: fuse_close_endpoints,source.png,89,89,0,26,34,8,0,0.8393,0.8322,0.8918,58,16,15
+fuse_close_endpoints,Step 4i: fuse_close_endpoints,sg2.png,98,100,2,44,60,16,0,0.7398,0.7131,0.9497,71,13,16
+fuse_close_endpoints,Step 4i: fuse_close_endpoints,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,75,77,2,50,75,25,0,0.7434,0.7516,0.8604,52,8,17
