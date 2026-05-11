@@ -35,34 +35,33 @@ REF_IMAGES = [
 
 
 PASSES: List[Tuple[str, str]] = [
-    # (id, human-readable description)
-    ("axis_align",            "Step 4a: axis_align_segments"),
-    ("snap_colinear",         "Step 4b: snap_colinear_coords (pass 1)"),
-    ("merge_collin_1",        "Step 4c: merge_collinear (pass 1, pre-T/L)"),
-    ("t_junction_snap",       "Step 4d: t_junction_snap"),
-    ("extend_to_intersect",   "Step 4d: extend_to_intersect"),
-    ("truncate_overshoots",   "Step 4d: truncate_overshoots"),
-    ("merge_collin_2",        "Step 4d: merge_collinear (pass 2, post T/L)"),
-    ("snap_endpoints_1",      "Step 4: snap_endpoints (pass 1, post T/L)"),
-    ("prune_tails",           "Step 4e: prune_tails"),
-    ("snap_endpoints_2",      "Step 4e: snap_endpoints (pass 2, post-prune)"),
-    ("manhattan_force_axis",  "Step 4f-a: manhattan_force_axis"),
-    ("manhattan_isect_snap",  "Step 4f-b: manhattan_intersection_snap (x2)"),
-    ("manhattan_t_project",   "Step 4f-c: manhattan_t_project"),
-    ("manhattan_merge_1",     "Step 4f-d: manhattan_ultimate_merge (post-Manhattan)"),
-    ("cluster_parallel",      "Step 4g: cluster_parallel_duplicates"),
-    ("grid_snap_1",           "Step 4g: grid_snap_endpoints (pass 1)"),
-    ("force_l_corner",        "Step 4g: force_l_corner_closure"),
-    ("grid_snap_2",           "Step 4g: grid_snap_endpoints (pass 2)"),
-    ("force_close_free_l_1",  "Step 4h: force_close_free_l_corners (pass 1)"),
-    ("t_snap_with_extension", "Step 4h: t_snap_with_extension"),
-    ("force_close_free_l_2",  "Step 4h: force_close_free_l_corners (pass 2)"),
-    ("final_polish_tails",    "Step 4h: final_polish_short_tails"),
-    ("brute_force_ray",       "Step 4i: brute_force_ray_extend"),
-    ("extend_trunk_to_loose", "Step 4i: extend_trunk_to_loose"),
-    ("mask_gated_l_extend",   "Step 4i: mask_gated_l_extend"),
-    ("insert_connectors",     "Step 4i: insert_missing_connectors"),
-    ("fuse_close_endpoints",  "Step 4i: fuse_close_endpoints"),
+    # (id, human-readable description). Matches the current vectorize_bgr
+    # geometric-optimisation pipeline (step 4.8 state). Passes removed by
+    # the refactor (force_l_corner_closure, force_close_free_l_corners,
+    # final_polish_short_tails, extend_trunk_to_loose, mask_gated_l_extend,
+    # extend_to_intersect, prune_tails, plus the manhattan_merge_1 /
+    # snap_endpoints_2 / grid_snap_1 / force_close_free_l_2 duplicate
+    # calls) are no longer represented; the proximal_bridge_generator
+    # added in step 4.7 is also not ablation-tested yet.
+    ("axis_align",            "axis_align_segments"),
+    ("snap_colinear",         "snap_colinear_coords"),
+    ("merge_collin_1",        "merge_collinear (pre-T/L)"),
+    ("t_junction_snap",       "t_junction_snap"),
+    ("truncate_overshoots",   "truncate_overshoots"),
+    ("merge_collin_2",        "merge_collinear (post T/L)"),
+    ("snap_endpoints_1",      "snap_endpoints"),
+    ("manhattan_force_axis",  "manhattan_force_axis"),
+    ("manhattan_isect_snap",  "manhattan_intersection_snap"),
+    ("manhattan_t_project",   "manhattan_t_project"),
+    ("cluster_parallel",      "cluster_parallel_duplicates"),
+    ("grid_snap_2",           "grid_snap_endpoints"),
+    ("manhattan_merge_2",     "manhattan_ultimate_merge (post-watertight)"),
+    ("t_snap_with_extension", "t_snap_with_extension (candidate)"),
+    ("manhattan_merge_3",     "manhattan_ultimate_merge (post-gap-closing)"),
+    ("brute_force_ray",       "brute_force_ray_extend (candidate)"),
+    ("insert_connectors",     "insert_missing_connectors (candidate)"),
+    ("fuse_close_endpoints",  "fuse_close_endpoints"),
+    ("manhattan_merge_4",     "manhattan_ultimate_merge (final)"),
 ]
 
 
@@ -112,78 +111,59 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
 
     s = typed_segments
 
-    # 4a
+    # Mirror of current vectorize_bgr's geometric-optimisation pipeline.
     if disabled != "axis_align":
         s = V.axis_align_segments(s, V.AXIS_SNAP_DEG)
     if disabled != "snap_colinear":
         s = V.snap_colinear_coords(s, t["colinear"])
-    # 4c (1)
     if disabled != "merge_collin_1":
         s = V.merge_collinear(s, t["merge_perp"], t["merge_gap"])
-    # 4d
     if disabled != "t_junction_snap":
         s = V.t_junction_snap(s, t["t_snap"])
-    if disabled != "extend_to_intersect":
-        s = V.extend_to_intersect(s, t["l_extend"])
     if disabled != "truncate_overshoots":
         s = V.truncate_overshoots(s, t["l_extend"])
     if disabled != "merge_collin_2":
         s = V.merge_collinear(s, t["merge_perp"], t["merge_gap"])
     if disabled != "snap_endpoints_1":
         s = V.snap_endpoints(s, t["snap"])
-    # 4e
-    if disabled != "prune_tails":
-        s = V.prune_tails(s, t["tail_prune"])
-    if disabled != "snap_endpoints_2":
-        s = V.snap_endpoints(s, t["snap"])
-    # 4f
     if disabled != "manhattan_force_axis":
         s = V.manhattan_force_axis(s)
     if disabled != "manhattan_isect_snap":
         s = V.manhattan_intersection_snap(s, t["manhattan"])
-        s = V.manhattan_intersection_snap(s, t["manhattan"])
     if disabled != "manhattan_t_project":
         s = V.manhattan_t_project(s, t["manhattan"])
-    if disabled != "manhattan_merge_1":
-        s = V.manhattan_ultimate_merge(s)
-    # 4g
     if disabled != "cluster_parallel":
         s = V.cluster_parallel_duplicates(s, t["parallel_merge"])
-    if disabled != "grid_snap_1":
-        s = V.grid_snap_endpoints(s, t["grid_snap"])
-    if disabled != "force_l_corner":
-        s = V.force_l_corner_closure(s, t["grid_snap"])
     if disabled != "grid_snap_2":
         s = V.grid_snap_endpoints(s, t["grid_snap"])
-    s = V.manhattan_ultimate_merge(s)
-    # 4h
-    if disabled != "force_close_free_l_1":
-        s = V.force_close_free_l_corners(s, t["gap_close"])
+    if disabled != "manhattan_merge_2":
+        s = V.manhattan_ultimate_merge(s)
     if disabled != "t_snap_with_extension":
         s = V.t_snap_with_extension(s, t["gap_close"], masks=masks)
-    if disabled != "force_close_free_l_2":
-        s = V.force_close_free_l_corners(s, t["gap_close"])
-    s = V.manhattan_ultimate_merge(s)
-    if disabled != "final_polish_tails":
-        s = V.final_polish_short_tails(s, t["gap_final"])
-    s = V.manhattan_ultimate_merge(s)
-    # 4i (in-place)
+    if disabled != "manhattan_merge_3":
+        s = V.manhattan_ultimate_merge(s)
     if disabled != "brute_force_ray":
         V.brute_force_ray_extend(s, t["ray_ext"], V.RAY_EXT_LOOSE_PX)
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
-    if disabled != "extend_trunk_to_loose":
-        V.extend_trunk_to_loose(s, t["trunk_perp"], t["trunk_gap"], masks=masks)
-    s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
-    if disabled != "mask_gated_l_extend":
-        s = V.mask_gated_l_extend(s, max_gap=t["l_ext_asym"], masks=masks)
     if disabled != "insert_connectors":
         V.insert_missing_connectors(s, t["colinear_loose"], t["connector_max"],
                                     wall_mask=masks.get("wall"))
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
+    # NOTE: proximal_bridge_generator (added step 4.7) is not yet ablation-
+    # tested. To test it, callers can wire ``_accept_bridge_candidates``
+    # behind another ``if disabled != "proximal_bridge":`` guard.
+    s = V._accept_bridge_candidates(s,
+                                     max_radius=t["l_ext_asym"],
+                                     wall_mask=masks.get("wall"),
+                                     wall_evidence=None,
+                                     door_mask=masks.get("door"),
+                                     window_mask=masks.get("window"))
+    s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
     if disabled != "fuse_close_endpoints":
         V.fuse_close_endpoints(s, t["ray_fuse"])
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
-    s = V.manhattan_ultimate_merge(s)
+    if disabled != "manhattan_merge_4":
+        s = V.manhattan_ultimate_merge(s)
     return s, masks
 
 
