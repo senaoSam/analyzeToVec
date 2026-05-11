@@ -3661,17 +3661,21 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     typed_segments: List[Dict] = []
     branch_stats = {}
     for label, mask in masks.items():
-        if label == "wall":
-            _log(f"  Skeletonize ({label})...")
-            skel = skeletonize_mask(mask)
-            branches = extract_branches(skel)
-            segs = branches_to_segments(branches)
-            branch_stats[label] = (int(skel.sum()), len(branches), len(segs))
-        else:
-            # Door / window: connected components → min-area rect → 4 sides.
-            _log(f"  Component-rects ({label})...")
-            segs = door_window_to_segments(mask)
-            branch_stats[label] = (int((mask > 0).sum()), 0, len(segs))
+        # Walls, doors, windows all go through skeleton → branches →
+        # approxPolyDP. The earlier step-2 detour that swapped door/window
+        # to a CC + minAreaRect centerline saved no measurable time on
+        # the three regression images and produced ~1 px centerline
+        # drift relative to the medial axis. Downstream snap passes
+        # cascaded that drift into the wall topology — observed as wrong
+        # T-junctions and reshaped corners on sg2. ``door_window_to_segments``
+        # is retained in this file as dead code for the candidate
+        # architecture to reconsider later, but the pipeline no longer
+        # calls it.
+        _log(f"  Skeletonize ({label})...")
+        skel = skeletonize_mask(mask)
+        branches = extract_branches(skel)
+        segs = branches_to_segments(branches)
+        branch_stats[label] = (int(skel.sum()), len(branches), len(segs))
         for x1, y1, x2, y2 in segs:
             typed_segments.append({"type": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
 
