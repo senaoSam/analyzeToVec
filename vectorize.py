@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import networkx as nx
@@ -2243,26 +2243,17 @@ def brute_force_ray_extend(lines: List[Dict],
             return
 
 
-def extend_trunk_to_loose(lines: List[Dict],
-                          perp_tol: float,
-                          gap_tol: float,
-                          masks: Dict[str, np.ndarray] = None,
-                          min_support: float = 0.6) -> None:
-    """Mutate `lines` IN PLACE: for each loose endpoint that's close to an
-    orthogonal trunk's axis line (perp distance <= perp_tol) but past the
-    trunk's body by <= gap_tol, extend the trunk to reach the endpoint and
-    snap the endpoint onto the (extended) trunk's exact axis.
+def _extend_trunk_to_loose_legacy(lines: List[Dict],
+                                   perp_tol: float,
+                                   gap_tol: float,
+                                   masks: Dict[str, np.ndarray] = None,
+                                   min_support: float = 0.6) -> None:
+    """Legacy step-1-era implementation kept for reference (no global score
+    check). Replaced by ``extend_trunk_to_loose`` which proposes the same
+    edits as candidates and accepts those whose pipeline-score delta is
+    non-negative.
 
-    This is the fix for cases where a long horizontal wall has a loose left
-    endpoint floating above a vertical wall whose top end is below the
-    horizontal — the brute-force pass refused to consider the vertical as
-    a snap target because the y-distance exceeded its tolerance, leaving
-    a 48-px gap. Here we explicitly accept that gap and extend the trunk.
-
-    If `masks` is provided, the proposed trunk-extension path is sampled
-    against the trunk's own type mask; only paths with >= `min_support`
-    fractional coverage are accepted. This stops the trunk from being
-    extended through white space to swallow an unrelated loose endpoint.
+    TODO(refactor): delete once step 4 is bedded in.
     """
     from collections import Counter
 
@@ -2420,6 +2411,219 @@ def extend_trunk_to_loose(lines: List[Dict],
 
         if not any_change:
             break
+
+
+def extend_trunk_to_loose(lines: List[Dict],
+                          perp_tol: float,
+                          gap_tol: float,
+                          masks: Dict[str, np.ndarray] = None,
+                          min_support: float = 0.6,
+                          *,
+                          wall_evidence: np.ndarray = None,
+                          door_mask: np.ndarray = None,
+                          window_mask: np.ndarray = None) -> None:
+    """Candidate-based step-4 implementation.
+
+    For each loose endpoint whose perpendicular distance to an orthogonal
+    same-or-higher-priority trunk's axis line is <= perp_tol and whose
+    along-axis distance past the trunk body is <= gap_tol, build a
+    Candidate that simultaneously:
+
+      - extends the trunk's near end to the projection point,
+      - moves the loose endpoint onto the (extended) trunk's axis,
+      - keeps the loose segment axis-aligned by moving its other end.
+
+    Mask support on the trunk-extension stretch (against the trunk's own
+    type mask) is checked as the evidence gate; below ``min_support`` the
+    candidate is dropped before scoring. Accepted candidates are those
+    whose pipeline-score delta is >= BRUTE_FORCE_MIN_ACCEPT_DELTA (the
+    same permissive threshold as ``brute_force_ray_extend``, since this
+    pass also produces deferred-payoff geometry that ``manhattan_t_project``
+    later converts into a junction).
+    """
+    import candidates as C
+    import scoring as S
+    from collections import Counter
+
+    if not lines:
+        return
+
+    if door_mask is None and masks is not None:
+        door_mask = masks.get("door")
+    if window_mask is None and masks is not None:
+        window_mask = masks.get("window")
+
+    for _pass in range(4):
+        end_count: Counter = Counter()
+        for s in lines:
+            end_count[(s["x1"], s["y1"])] += 1
+            end_count[(s["x2"], s["y2"])] += 1
+
+        cands: List[C.Candidate] = []
+        for i, seg in enumerate(lines):
+            seg_axis = _seg_axis_strict(seg)
+            if seg_axis not in ("h", "v"):
+                continue
+            my_prio = TYPE_PRIORITY.get(seg["type"], 99)
+            for end in ("1", "2"):
+                ex = float(seg[f"x{end}"])
+                ey = float(seg[f"y{end}"])
+                if end_count[(ex, ey)] != 1:
+                    continue
+
+                best = None
+                best_score: Optional[Tuple[float, float]] = None
+                for j, trunk in enumerate(lines):
+                    if i == j:
+                        continue
+                    trunk_axis = _seg_axis_strict(trunk)
+                    if trunk_axis == seg_axis or trunk_axis not in ("h", "v"):
+                        continue
+                    if TYPE_PRIORITY.get(trunk["type"], 99) < my_prio:
+                        continue
+
+                    if trunk_axis == "v":
+                        line_x = float(trunk["x1"])
+                        t_lo, t_hi = sorted((float(trunk["y1"]), float(trunk["y2"])))
+                        perp = abs(ex - line_x)
+                        if perp > perp_tol:
+                            continue
+                        if t_lo <= ey <= t_hi:
+                            gap = 0.0
+                            extend_side = None
+                        elif ey < t_lo:
+                            gap = t_lo - ey
+                            extend_side = "lo"
+                        else:
+                            gap = ey - t_hi
+                            extend_side = "hi"
+                        if gap > gap_tol:
+                            continue
+                        score = (perp, gap)
+                        if best_score is None or score < best_score:
+                            best_score = score
+                            best = (j, line_x, ey, extend_side, "v")
+                    else:
+                        line_y = float(trunk["y1"])
+                        t_lo, t_hi = sorted((float(trunk["x1"]), float(trunk["x2"])))
+                        perp = abs(ey - line_y)
+                        if perp > perp_tol:
+                            continue
+                        if t_lo <= ex <= t_hi:
+                            gap = 0.0
+                            extend_side = None
+                        elif ex < t_lo:
+                            gap = t_lo - ex
+                            extend_side = "lo"
+                        else:
+                            gap = ex - t_hi
+                            extend_side = "hi"
+                        if gap > gap_tol:
+                            continue
+                        score = (perp, gap)
+                        if best_score is None or score < best_score:
+                            best_score = score
+                            best = (j, ex, line_y, extend_side, "h")
+
+                if best is None:
+                    continue
+
+                trunk_idx, snap_x, snap_y, extend_side, trunk_axis = best
+                trunk = lines[trunk_idx]
+
+                # Evidence gate: trunk-extension stretch must lie on the
+                # trunk's own mask. No mask → no gate (legacy semantics).
+                if extend_side is not None and masks is not None:
+                    trunk_mask = masks.get(trunk["type"])
+                    if trunk_mask is not None:
+                        if trunk_axis == "v":
+                            old_lo, old_hi = sorted((float(trunk["y1"]), float(trunk["y2"])))
+                            if extend_side == "lo":
+                                ext_lo, ext_hi = min(snap_y, old_lo), old_lo
+                            else:
+                                ext_lo, ext_hi = old_hi, max(snap_y, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, snap_x, ext_lo, snap_x, ext_hi)
+                                if support < min_support:
+                                    continue
+                        else:
+                            old_lo, old_hi = sorted((float(trunk["x1"]), float(trunk["x2"])))
+                            if extend_side == "lo":
+                                ext_lo, ext_hi = min(snap_x, old_lo), old_lo
+                            else:
+                                ext_lo, ext_hi = old_hi, max(snap_x, old_hi)
+                            if ext_hi - ext_lo > 1.0:
+                                support = _path_mask_support(
+                                    trunk_mask, ext_lo, snap_y, ext_hi, snap_y)
+                                if support < min_support:
+                                    continue
+
+                # Build mutation list.
+                mut: List[Tuple[int, str, float, float]] = []
+                if extend_side is not None:
+                    if trunk_axis == "v":
+                        is_y1_lo = float(trunk["y1"]) <= float(trunk["y2"])
+                        lo_end, hi_end = ("1", "2") if is_y1_lo else ("2", "1")
+                        target_end = lo_end if extend_side == "lo" else hi_end
+                        mut.append((trunk_idx, target_end,
+                                    float(trunk[f"x{target_end}"]), snap_y))
+                    else:
+                        is_x1_lo = float(trunk["x1"]) <= float(trunk["x2"])
+                        lo_end, hi_end = ("1", "2") if is_x1_lo else ("2", "1")
+                        target_end = lo_end if extend_side == "lo" else hi_end
+                        mut.append((trunk_idx, target_end,
+                                    snap_x, float(trunk[f"y{target_end}"])))
+
+                # Loose endpoint → onto trunk axis. Opposite end is also
+                # adjusted to keep the loose segment axis-aligned.
+                mut.append((i, end, snap_x, snap_y))
+                other = "2" if end == "1" else "1"
+                if seg_axis == "h":
+                    mut.append((i, other, float(seg[f"x{other}"]), snap_y))
+                else:
+                    mut.append((i, other, snap_x, float(seg[f"y{other}"])))
+
+                cands.append(C.Candidate(
+                    op="l_extend",
+                    add=[],
+                    mutate=mut,
+                    meta={"perp": best_score[0], "gap": best_score[1],
+                          "extend_side": extend_side},
+                ))
+
+        if not cands:
+            return
+
+        cands.sort(key=lambda c: (c.meta["perp"], c.meta["gap"]))
+
+        current = list(lines)
+        base_score = S.compute_score(current,
+                                     wall_evidence=wall_evidence,
+                                     door_mask=door_mask,
+                                     window_mask=window_mask)
+        used_mutations: Set[Tuple[int, str]] = set()
+        any_accepted = False
+        for cand in cands:
+            if any((idx, end) in used_mutations
+                   for (idx, end, _, _) in cand.mutate):
+                continue
+            trial = C.apply_candidate(current, cand)
+            trial_score = S.compute_score(trial,
+                                          wall_evidence=wall_evidence,
+                                          door_mask=door_mask,
+                                          window_mask=window_mask)
+            delta = trial_score.total - base_score.total
+            if delta >= BRUTE_FORCE_MIN_ACCEPT_DELTA:
+                current = trial
+                base_score = trial_score
+                for (idx, end, _, _) in cand.mutate:
+                    used_mutations.add((idx, end))
+                any_accepted = True
+        lines.clear()
+        lines.extend(current)
+        if not any_accepted:
+            return
 
 
 def _path_mask_support(mask: np.ndarray, x1: float, y1: float,
