@@ -3841,9 +3841,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # Wall-priority NetworkX node merge.
     s4 = snap_endpoints(s3, snap_tol)
 
-    # (4) Prune dangling tails — strict definition that protects cross-type
-    #     connections (door/window jambs are never deleted).
-    s5 = prune_tails(s4, tail_prune)
+    # prune_tails removed in step 4.8: try removal and revert if FAIL.
+    s5 = s4
 
     # --- STRICT MANHATTAN ROUTING (zero diagonals) ----------------------
     # (a) Force every segment to be exactly horizontal or exactly vertical.
