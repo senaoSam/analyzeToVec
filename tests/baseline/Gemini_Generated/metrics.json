@@ -1,0 +1,49 @@
+{
+  "regression_format_version": 1,
+  "rasterizer_version": 1,
+  "stroke_width": 9.550000190734863,
+  "image_shape": [
+    1664,
+    2586
+  ],
+  "hash": "ae1b21f17d7a45adca153e45488e6254313a1563",
+  "graph": {
+    "num_segments": 75,
+    "count_by_type": {
+      "wall": 51,
+      "window": 7,
+      "door": 17
+    },
+    "free_endpoints": 48,
+    "num_short_segments": 0,
+    "total_length_by_type": {
+      "wall": 14506.0,
+      "window": 811.0,
+      "door": 2336.0
+    }
+  },
+  "thickness_px": {
+    "thin": 2,
+    "normal": 4,
+    "loose": 8
+  },
+  "masks": {
+    "wall": {
+      "thin": "wall_thin.png",
+      "normal": "wall_normal.png",
+      "loose": "wall_loose.png"
+    },
+    "window": {
+      "thin": "window_thin.png",
+      "normal": "window_normal.png",
+      "loose": "window_loose.png"
+    },
+    "door": {
+      "thin": "door_thin.png",
+      "normal": "door_normal.png",
+      "loose": "door_loose.png"
+    }
+  },
+  "baseline_updated_at": "2026-05-11T10:01:26",
+  "baseline_updated_by": "manual_yes_flag"
+}

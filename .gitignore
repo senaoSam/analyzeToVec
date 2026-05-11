@@ -31,6 +31,10 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Regression harness per-run outputs (regenerated every `python regression.py`).
+# baseline/ and cases/ are committed; current/ is not.
+tests/current/
+
 # Local environment
 .env
 .env.local
