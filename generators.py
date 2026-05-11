@@ -34,9 +34,11 @@ from __future__ import annotations
 from collections import Counter
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 
 import candidates as C
+from canonical_line import compute_local_thickness
 
 
 def _axis_of(seg: Dict) -> str:
@@ -61,6 +63,13 @@ BRIDGE_MIN_SUPPORT = 0.85
 # axis", which routes the proposal to the axis-bridge (single new segment)
 # case instead of the L-bridge (two-segment corner).
 BRIDGE_COLINEAR_TOL_PX = 2.5
+
+# Maximum stroke-width ratio between two endpoints' host wall segments for
+# a bridge proposal to be even built. A 4 px wall and a 12 px wall almost
+# never belong to the same logical wall — bridging them creates a phantom
+# segment. The check is a no-op when either segment's local_thickness is
+# unknown (returns ``-1`` from ``compute_local_thickness``).
+BRIDGE_MAX_THICKNESS_RATIO = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +99,7 @@ def proximal_bridge_candidates(segments: List[Dict],
                                 max_radius: float,
                                 min_support: float = BRIDGE_MIN_SUPPORT,
                                 colinear_tol: float = BRIDGE_COLINEAR_TOL_PX,
+                                max_thickness_ratio: float = BRIDGE_MAX_THICKNESS_RATIO,
                                 ) -> List[C.Candidate]:
     """Propose bridges between nearby pairs of wall endpoints.
 
@@ -139,6 +149,19 @@ def proximal_bridge_candidates(segments: List[Dict],
     if wall_mask is None or not segments:
         return []
 
+    # Per-segment local thickness, sampled from the wall mask distance
+    # transform once up front. Used downstream to reject bridge proposals
+    # between endpoints whose host walls have incompatible stroke widths
+    # (per step 4.9.6 — a single bridge across a thin-to-thick boundary
+    # is almost always a phantom).
+    dt = cv2.distanceTransform((wall_mask > 0).astype(np.uint8),
+                               cv2.DIST_L2, 3)
+    seg_thickness: Dict[int, float] = {}
+    for i, s in enumerate(segments):
+        if s.get("type") != "wall":
+            continue
+        seg_thickness[i] = compute_local_thickness(s, dt)
+
     # All wall endpoints with owning segment + the segment's axis. The
     # axis tells us which mutations are "safe" (axis-preserving).
     wall_endpoints: List[Dict] = []
@@ -179,6 +202,21 @@ def proximal_bridge_candidates(segments: List[Dict],
             # junction or "connected enough"; skip.
             if d2 < 1.0:
                 continue
+
+            # Step 4.9.6: stroke-width compatibility. Reject pairs whose
+            # host wall segments have very different local thickness —
+            # a thin-wall endpoint should not be bridged to a thick-wall
+            # endpoint, because the resulting bridge would have to be one
+            # uniform width, contradicting at least one of the inputs.
+            # ``compute_local_thickness`` returns -1 for segments where
+            # sampling failed (very short / off-mask); we let those
+            # through unchecked rather than over-rejecting on weak data.
+            ta = seg_thickness.get(a["seg"], -1.0)
+            tb = seg_thickness.get(b["seg"], -1.0)
+            if ta > 0 and tb > 0:
+                ratio = max(ta, tb) / max(min(ta, tb), 1e-6)
+                if ratio > max_thickness_ratio:
+                    continue
             dx = abs(dxs)
             dy = abs(dys)
 
