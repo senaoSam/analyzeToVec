@@ -3827,10 +3827,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # (3a) T-junction node-to-edge snap: chromatic endpoints onto wall bodies,
     #      same-type endpoints onto own bodies. Walls never snap to chromatic.
     s3 = t_junction_snap(s2, t_snap)
-    # (3b) L-corner extend-to-intersect: nearest endpoints of a perpendicular
-    #      pair are pulled to their exact intersection — extending if short,
-    #      truncating if they overshoot.
-    s3 = extend_to_intersect(s3, l_extend)
+    # (3b) extend_to_intersect (legacy L-corner extend pass) removed in
+    #      step 4.8: post-junction-aware-merge ablation showed IOU=0.9967
+    #      and dFree=1 — the same corner-closure work is now done by the
+    #      proximal_bridge generator's L-bridge case, which the scorer
+    #      accepts when mask support is present.
     # (3c) Truncate any remaining overshoots: an endpoint sitting on the far
     #      side of a perpendicular wall by less than tol gets clipped back.
     s3 = truncate_overshoots(s3, l_extend)
@@ -3863,16 +3864,18 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     s7 = manhattan_ultimate_merge(s7)
 
     # --- ULTIMATE GAP CLOSING (degree-1 carpet bombing) -----------------
-    # (1) Force-close pairs of free L-corners within gap_close px to their
-    #     exact intersection. Ablation originally marked this NO-OP, but
-    #     removing it after deleting the other NO-OP passes regressed door
-    #     IOU on Gemini_Generated — its NO-OP-ness was conditional on the
-    #     earlier passes still running. Kept.
-    s8 = force_close_free_l_corners(s7, gap_close)
+    # (1) force_close_free_l_corners (force-close pairs of free L-corners
+    #     within gap_close px to their exact intersection). Removed during
+    #     step 4.8 NO-OP cleanup: post-junction-aware-merge ablation
+    #     showed max|dN|=1, max|dFree|=1, IOU=1.0000 on all 3 images, and
+    #     the regression remained PASS bit-identical after removal. Earlier
+    #     Gemini-regression observation that gated this against deletion
+    #     no longer applies — the proximal_bridge_generator + junction-
+    #     aware merge now closes the same L-corners directly.
     # (2) T-snap with trunk auto-extension: a loose endpoint that projects
     #     past a trunk's body within tol triggers an extension of the trunk.
     #     The masks gate prevents extending through white space.
-    s8 = t_snap_with_extension(s8, gap_close, masks=masks)
+    s8 = t_snap_with_extension(s7, gap_close, masks=masks)
     s8 = manhattan_ultimate_merge(s8)
 
     snapped = s8
