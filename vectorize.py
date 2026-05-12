@@ -2972,7 +2972,16 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
     )
-    s7 = grid_snap_endpoints(s7, grid_snap)
+    # Step 7 phase 3: candidate-based wrapper. ``grid_snap_endpoints`` is
+    # semantically identical to ``manhattan_t_project`` -- same wall-
+    # priority gate, same body-containment, same perpendicular-distance
+    # rule, same single-axis mutate. The only difference is tol source:
+    # ``grid_snap_endpoints`` uses a fixed tol, ``manhattan_t_project``
+    # uses thickness-aware. Passing ``masks=None`` makes the shared
+    # ``_accept_t_project_candidates`` use the fixed ``fallback_tol``
+    # everywhere, reproducing grid_snap behaviour exactly. Two legacy
+    # passes now share one candidate generator.
+    s7 = _accept_t_project_candidates(s7, fallback_tol=grid_snap, masks=None)
     # manhattan_ultimate_merge (post-watertight) removed step 4.8 cleanup:
     # latest ablation shows it as NO-OP across all 3 images now that the
     # final merge at the end of the pipeline is junction-aware.
