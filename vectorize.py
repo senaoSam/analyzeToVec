@@ -2005,6 +2005,58 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_t_project_candidates(lines: List[Dict],
+                                  *,
+                                  fallback_tol: float,
+                                  masks: Optional[Dict[str, np.ndarray]] = None,
+                                  ) -> List[Dict]:
+    """Step 7 phase 2: candidate-based ``manhattan_t_project``.
+
+    One Candidate per endpoint with a valid orthogonal-trunk projection;
+    ``used_endpoints`` set prevents double-mutating the same endpoint, so
+    each endpoint is projected at most once (matches legacy single-pass).
+
+    No score gate. Legacy ``manhattan_t_project`` has no equivalent of
+    score either — its safety net is the per-pair geometric gate (wall-
+    priority + thickness-aware perpendicular tol + body-containment). The
+    legacy gate is reproduced exactly inside ``t_project_candidates``;
+    the loop here is structural plumbing only.
+
+    Sort by projection distance: closer trunks first. Combined with the
+    used_endpoints filter, this guarantees each endpoint picks the same
+    trunk legacy would have (the smallest-distance candidate that's still
+    available when it gets its turn). For endpoints that have *only one*
+    valid trunk (the common case after canonical_line normalises lines),
+    order doesn't matter at all.
+    """
+    import candidates as C
+    import generators as G
+    if not lines:
+        return list(lines)
+
+    seg_tols = _compute_seg_tols(lines, masks, fallback=fallback_tol) \
+        if masks is not None else [fallback_tol] * len(lines)
+
+    cands = G.t_project_candidates(lines, seg_tols=seg_tols)
+    if not cands:
+        return [s for s in lines
+                if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    cands.sort(key=lambda c: (c.meta["projection_dist"],
+                              c.meta["endpoint_key"]))
+
+    current = list(lines)
+    used_endpoints: set = set()
+    for cand in cands:
+        ek = cand.meta["endpoint_key"]
+        if ek in used_endpoints:
+            continue
+        current = C.apply_candidate(current, cand)
+        used_endpoints.add(ek)
+
+    return [s for s in current
+            if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+
 def _accept_fuse_candidates(lines: List[Dict],
                              *,
                              fallback_tol: float,
@@ -2878,7 +2930,15 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #     + T-project + intersection-on-fuse path now.
     # (c) T-junction projection onto orthogonal trunks. Step 4.9.4: tol
     #     scales with the trunk's local thickness, fallback ``manhattan_tol``.
-    s6 = manhattan_t_project(s6, manhattan_tol, masks=masks)
+    # Step 7 phase 2: candidate-based wrapper around the same projection
+    # logic. One Candidate per endpoint with a valid trunk match; the
+    # ``used_endpoints`` filter mirrors legacy single-pass semantics
+    # (each endpoint projected at most once). No score gate — legacy
+    # didn't have one either; the per-pair geometric gate (wall-priority
+    # + thickness-aware tol + body-containment) is reproduced exactly
+    # inside ``t_project_candidates``.
+    s6 = _accept_t_project_candidates(s6, fallback_tol=manhattan_tol,
+                                      masks=masks)
     # (d) Ultimate collinear merge: post-step-4.7 ablation confirmed this
     #     first manhattan_ultimate_merge call is NO-OP after the upstream
     #     passes had their inputs unchanged by step 4 / 4.6 / 4.7 — the

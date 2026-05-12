@@ -758,3 +758,125 @@ def endpoint_fuse_candidates(segments: List[Dict],
             ))
 
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 7 phase 2: t_project_candidates  (replaces manhattan_t_project)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``manhattan_t_project``: for every endpoint (i, end), find the closest
+# orthogonal trunk j whose body covers the endpoint's along-axis coord within
+# trunk j's thickness-aware tol, then rewrite the endpoint to that trunk's
+# exact projection. Each endpoint gets ONE projection at most (the closest
+# valid trunk). Wall-priority: walls never project onto chromatic trunks.
+#
+# Translation: one Candidate per (i, end) with a valid trunk match, carrying
+# a single-endpoint mutate. The accept loop tracks ``used_endpoints`` so each
+# (i, end) is mutated at most once — mirrors legacy single-pass semantics
+# without needing a fresh regenerate per iteration. The trunk projection is
+# computed from the original geometry inside the generator and baked into
+# the mutate's ``(new_x, new_y)``, so subsequent accepts can't be skewed
+# by partial mutations (the new_x / new_y is fixed at generation time).
+#
+# No fixed-point loop here. A second pass would only kick in if an already-
+# projected endpoint became near a *different* trunk after its initial
+# projection — legacy explicitly doesn't do that, and step-4.9.7 ablation
+# already confirmed the existing ``manhattan_intersection_snap`` pass (which
+# did a similar two-pass thing) was a pure no-op. So single-shot via
+# ``used_endpoints`` matches.
+
+def t_project_candidates(segments: List[Dict],
+                          seg_tols: Sequence[float],
+                          ) -> List[C.Candidate]:
+    """Emit one mutate-only candidate per endpoint with a valid T-projection.
+
+    Each endpoint scans every strictly-orthogonal segment, gates on:
+      - axis orthogonality (H endpoint -> V trunk, and vice versa)
+      - wall-priority (priority(self) >= priority(trunk); walls don't snap
+        onto chromatic trunks)
+      - along-axis containment: the endpoint's along-trunk coord lies in
+        ``[lo - trunk_tol, hi + trunk_tol]`` of the trunk's body
+      - perpendicular distance to the trunk's line <= trunk_tol
+
+    Of all gates-passing trunks, the closest (smallest perpendicular
+    distance) wins; tie-broken by trunk index. Each candidate carries
+    ``meta["endpoint_key"] = (seg_idx, end)`` so the accept loop can
+    enforce "at most one projection per endpoint".
+    """
+    if not segments:
+        return []
+    if len(seg_tols) != len(segments):
+        raise ValueError("seg_tols must have same length as segments")
+
+    n = len(segments)
+    axes = [_axis_of(s) for s in segments]
+    cands: List[C.Candidate] = []
+
+    for i in range(n):
+        seg = segments[i]
+        my_axis = axes[i]
+        if my_axis not in ("h", "v"):
+            continue
+        my_prio = _TYPE_PRIORITY.get(seg.get("type", ""), 99)
+
+        for end in ("1", "2"):
+            ex = float(seg[f"x{end}"])
+            ey = float(seg[f"y{end}"])
+            best_d = float("inf")
+            best_target: Optional[Tuple[float, float, int]] = None
+
+            for j in range(n):
+                if j == i:
+                    continue
+                trunk_axis = axes[j]
+                if trunk_axis == my_axis:
+                    continue
+                if trunk_axis not in ("h", "v"):
+                    continue
+                trunk = segments[j]
+                trunk_prio = _TYPE_PRIORITY.get(trunk.get("type", ""), 99)
+                # Wall-priority: forbid projecting a higher-priority (lower
+                # number, e.g. wall=0) endpoint onto a lower-priority
+                # (chromatic) trunk.
+                if my_prio < trunk_prio:
+                    continue
+                trunk_tol = float(seg_tols[j])
+                if trunk_axis == "v":
+                    line_x = float(trunk["x1"])
+                    lo, hi = sorted((float(trunk["y1"]), float(trunk["y2"])))
+                    if not (lo - trunk_tol <= ey <= hi + trunk_tol):
+                        continue
+                    d = abs(ex - line_x)
+                    if d <= trunk_tol and d < best_d:
+                        best_d = d
+                        best_target = (line_x, ey, j)
+                else:  # trunk is horizontal
+                    line_y = float(trunk["y1"])
+                    lo, hi = sorted((float(trunk["x1"]), float(trunk["x2"])))
+                    if not (lo - trunk_tol <= ex <= hi + trunk_tol):
+                        continue
+                    d = abs(ey - line_y)
+                    if d <= trunk_tol and d < best_d:
+                        best_d = d
+                        best_target = (ex, line_y, j)
+
+            if best_target is None:
+                continue
+            new_x, new_y, trunk_idx = best_target
+            # No-op projection: same coord already.
+            if abs(new_x - ex) <= 1e-12 and abs(new_y - ey) <= 1e-12:
+                continue
+            cands.append(C.Candidate(
+                op="t_project",
+                add=[],
+                remove=[],
+                mutate=[(i, end, new_x, new_y)],
+                meta={
+                    "endpoint_key": (i, end),
+                    "trunk_idx": trunk_idx,
+                    "projection_dist": best_d,
+                    "self_axis": my_axis,
+                },
+            ))
+
+    return cands
