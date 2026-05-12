@@ -1395,6 +1395,37 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_t_junction_snap_candidates(lines: List[Dict],
+                                         *,
+                                         tol: float,
+                                         ) -> List[Dict]:
+    """Step 10 phase 2: candidate-based ``t_junction_snap``.
+
+    Same generator-internal cascade simulation as
+    ``_accept_truncate_overshoot_candidates``: legacy mutates segs[i]
+    in place and subsequent (i', end') iterations read mutated state
+    when scanning trunks. The generator simulates that in a local copy
+    and emits one candidate per mutated endpoint carrying the final
+    coord; batch-applying those candidates to the original input
+    reproduces legacy bit-identically.
+
+    Closing zero-length filter mirrors legacy.
+    """
+    import candidates as C
+    import generators as G
+    if not lines:
+        return list(lines)
+    cands = G.t_junction_snap_candidates(lines, tol=tol)
+    if not cands:
+        return [s for s in lines
+                if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    current = list(lines)
+    for cand in cands:
+        current = C.apply_candidate(current, cand)
+    return [s for s in current
+            if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+
 def _accept_manhattan_force_axis_candidates(lines: List[Dict]) -> List[Dict]:
     """Step 10 phase 1: candidate-based ``manhattan_force_axis``.
 
@@ -2531,7 +2562,12 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
 
     # (3a) T-junction node-to-edge snap: chromatic endpoints onto wall bodies,
     #      same-type endpoints onto own bodies. Walls never snap to chromatic.
-    s3 = t_junction_snap(s2, t_snap)
+    # Step 10 phase 2: candidate-based wrapper. Generator simulates
+    # legacy's order-dependent in-place mutation cascade in a local
+    # copy and emits one Candidate per snapped endpoint with the
+    # cascade's *final* coord; batch apply reproduces legacy bit-
+    # identically. Full-pipeline load-bearing (min IOU 0.81 ablation).
+    s3 = _accept_t_junction_snap_candidates(s2, tol=t_snap)
     # (3b) extend_to_intersect (legacy L-corner extend pass) removed in
     #      step 4.8: post-junction-aware-merge ablation showed IOU=0.9967
     #      and dFree=1 — the same corner-closure work is now done by the

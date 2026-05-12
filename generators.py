@@ -1567,3 +1567,127 @@ def manhattan_force_axis_candidates(segments: List[Dict]) -> List[C.Candidate]:
                                                     abs(x2 - xmid))},
                 ))
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 10 phase 2: t_junction_snap_candidates  (replaces t_junction_snap)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``t_junction_snap``: for every endpoint (i, end), scan every
+# axis-aligned segment j; if the endpoint lies within ``perp_tol`` of
+# trunk j's body (perpendicular distance check + along-axis containment
+# inside the trunk's span), find the trunk whose snap point is closest
+# in Euclidean distance to the endpoint, and snap the endpoint there.
+# Anchor rule: wall endpoints never snap onto chromatic trunks.
+#
+# Same order-dependent in-place mutation cascade as ``truncate_overshoots``:
+# legacy mutates ``segs[i]`` in place and subsequent (i', end') iterations
+# read mutated state when scanning trunks. The generator therefore must
+# simulate the cascade in a local copy to capture the final endpoint
+# coords; batch-applying those final coords to the original input via
+# ``apply_candidate`` reproduces legacy behaviour bit-identically.
+#
+# Critical difference from ``t_project_candidates``: t_project only does
+# perpendicular projection along one axis (the trunk's line); t_junction
+# snaps onto an arbitrary *point* on the trunk's body, so both x and y
+# of the endpoint can be mutated. The snap point lies on the trunk's
+# line but at the projected along-axis coord (clamped to the trunk's
+# span). The legacy helper ``_point_on_axis_seg`` does this math.
+
+# Wall-priority mapping (duplicated from _TYPE_PRIORITY at top of file).
+
+def _point_on_axis_seg_local(px: float, py: float, seg: Dict,
+                              perp_tol: float
+                              ) -> Tuple[bool, float, float]:
+    """Mirror of ``vectorize._point_on_axis_seg``. Returns
+    ``(ok, sx, sy)`` where (sx, sy) is the projected point on the
+    axis-aligned seg's body (clamped to span), or (False, px, py) when
+    the input is outside the perp_tol band or the along-axis span."""
+    # Determine axis with strict equality (matches _classify_axis).
+    if seg["y1"] == seg["y2"] and seg["x1"] != seg["x2"]:
+        lo, hi = sorted((float(seg["x1"]), float(seg["x2"])))
+        line_y = float(seg["y1"])
+        if abs(py - line_y) <= perp_tol and \
+           (lo - perp_tol) <= px <= (hi + perp_tol):
+            sx = min(max(px, lo), hi)
+            return True, sx, line_y
+    elif seg["x1"] == seg["x2"] and seg["y1"] != seg["y2"]:
+        lo, hi = sorted((float(seg["y1"]), float(seg["y2"])))
+        line_x = float(seg["x1"])
+        if abs(px - line_x) <= perp_tol and \
+           (lo - perp_tol) <= py <= (hi + perp_tol):
+            sy = min(max(py, lo), hi)
+            return True, line_x, sy
+    return False, px, py
+
+
+def _is_diag_local(seg: Dict) -> bool:
+    """Strict diagonal check matching ``_classify_axis`` (a seg is
+    diagonal iff neither x1 == x2 nor y1 == y2)."""
+    h = seg["y1"] == seg["y2"] and seg["x1"] != seg["x2"]
+    v = seg["x1"] == seg["x2"] and seg["y1"] != seg["y2"]
+    return not (h or v)
+
+
+def t_junction_snap_candidates(segments: List[Dict],
+                                tol: float,
+                                ) -> List[C.Candidate]:
+    """Emit one mutate-only candidate per endpoint that legacy
+    ``t_junction_snap`` would snap onto an orthogonal trunk body.
+
+    Simulates legacy's order-dependent in-place mutation cascade in a
+    local ``segs_sim`` copy; captures each mutated endpoint's *final*
+    coord (after all the inner-j matches for that (i, end)). Batch-
+    applying those captured coords to the original input reproduces
+    legacy's final state.
+    """
+    if not segments:
+        return []
+    n = len(segments)
+    segs_sim = [dict(s) for s in segments]
+    final_mutates: List[Tuple[int, str, float, float]] = []
+
+    for i in range(n):
+        my_prio = _TYPE_PRIORITY.get(segs_sim[i].get("type", ""), 99)
+        for end in ("1", "2"):
+            ex_key = f"x{end}"
+            ey_key = f"y{end}"
+            ex0 = float(segs_sim[i][ex_key])
+            ey0 = float(segs_sim[i][ey_key])
+            best = None
+            best_d = tol
+            for j in range(n):
+                if j == i:
+                    continue
+                other = segs_sim[j]  # LIVE: sees prior mutations
+                if _is_diag_local(other):
+                    continue
+                # Anchor rule: wall endpoint never snaps onto chromatic body.
+                other_prio = _TYPE_PRIORITY.get(other.get("type", ""), 99)
+                if my_prio < other_prio:
+                    continue
+                ok, sx, sy = _point_on_axis_seg_local(
+                    ex0, ey0, other, tol)
+                if not ok:
+                    continue
+                d = float(np.hypot(sx - ex0, sy - ey0))
+                if d < best_d:
+                    best_d = d
+                    best = (sx, sy)
+            if best is not None:
+                segs_sim[i][ex_key] = best[0]
+                segs_sim[i][ey_key] = best[1]
+                if abs(best[0] - ex0) > 1e-12 or abs(best[1] - ey0) > 1e-12:
+                    final_mutates.append((i, end, best[0], best[1]))
+
+    cands: List[C.Candidate] = []
+    for (i, end, new_x, new_y) in final_mutates:
+        cands.append(C.Candidate(
+            op="t_junction_snap",
+            add=[],
+            remove=[],
+            mutate=[(i, end, new_x, new_y)],
+            meta={"endpoint_key": (i, end)},
+        ))
+    return cands
+
