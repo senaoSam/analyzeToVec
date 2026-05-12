@@ -999,3 +999,167 @@ def endpoint_cluster_2d_candidates(segments: List[Dict],
         ))
 
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 8: cluster_collinear_merge_candidates  (replaces early merge_collinear)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``merge_collinear`` is structurally a cluster-component merge:
+#   1. bucket by (type, axis)
+#   2. within each bucket, 1D-cluster by perp coord within ``perp_tol`` (walk
+#      sorted, consecutive-within-tol joins; this is connected-component
+#      clustering on 1D sorted perp coords -- same shape as the 1D fuse
+#      generator's clustering)
+#   3. within each perp-cluster, sort by along-axis lo; sweep merging while
+#      ``next.lo - cur.hi <= gap_tol``; when the sweep fails the gap test,
+#      flush the current group and start a new one
+#   4. each "along-group" (the result of the sweep) becomes one output
+#      segment with canon_line = length-weighted mean of *own segment
+#      length* of every member
+#
+# The phase-1 ``collinear_merge_candidates`` (pair-based) cannot reproduce
+# this bit-identical: when chains of 3+ segments fold transitively, phase 1's
+# fixed-point loop uses the *union* along-axis length as the weight after the
+# first merge (because the merged seg's ``len_a = a_hi - a_lo`` is now the
+# union), whereas legacy keeps each original segment's own length in the
+# weighted mean. The difference is sub-pixel but real -- step 6 phase 2
+# observed it as drift, reverted.
+#
+# This generator emits one Candidate per along-group, ``remove`` listing every
+# member's index and ``add`` carrying one new merged segment. The accept loop
+# applies them as atomic batches; clusters are disjoint by construction (the
+# bucket + 1D-perp-cluster + along-sweep partition is a partition) so order
+# of accept doesn't matter. Score gate is bypassed (``skip_score=True``) --
+# the geometric gate is identical to legacy and is the entire safety net.
+
+def cluster_collinear_merge_candidates(segments: List[Dict],
+                                        *,
+                                        perp_tol: float,
+                                        gap_tol: float,
+                                        ) -> List[C.Candidate]:
+    """1:1 port of legacy ``vectorize.merge_collinear``.
+
+    Bucket by (type, axis); 1D-cluster by perp coord within ``perp_tol``;
+    inside each perp-cluster sort by along-axis lo and sweep-merge while
+    ``next.lo - cur.hi <= gap_tol``. Each along-group with >= 2 members
+    becomes one ``Candidate(op="merge", remove=[...], add=[merged_seg])``.
+
+    The merged segment's line coordinate is the length-weighted mean of
+    every original member's ``own`` along-axis length -- *not* the
+    running union's length, which is what pair-based fixed-point merging
+    drifts into. Diagonals pass through (no candidate emitted).
+    """
+    if not segments:
+        return []
+
+    h_buckets: Dict[str, List[int]] = {}
+    v_buckets: Dict[str, List[int]] = {}
+    for i, s in enumerate(segments):
+        ax = _axis_of(s)
+        if ax == "h":
+            h_buckets.setdefault(s.get("type", ""), []).append(i)
+        elif ax == "v":
+            v_buckets.setdefault(s.get("type", ""), []).append(i)
+
+    cands: List[C.Candidate] = []
+
+    def _process(idxs: List[int], axis: str, type_name: str) -> None:
+        if len(idxs) < 2:
+            return
+        # items[k] = (orig_idx, lo, hi, line, own_length)
+        items: List[Tuple[int, float, float, float, float]] = []
+        for i in idxs:
+            seg = segments[i]
+            if axis == "h":
+                lo, hi = sorted((float(seg["x1"]), float(seg["x2"])))
+                line = float(seg["y1"])
+            else:
+                lo, hi = sorted((float(seg["y1"]), float(seg["y2"])))
+                line = float(seg["x1"])
+            items.append((i, lo, hi, line, hi - lo))
+
+        # 1D perp-cluster (matches legacy: walk sorted by line, join when
+        # delta <= perp_tol).
+        order = sorted(range(len(items)), key=lambda k: items[k][3])
+        perp_clusters: List[List[int]] = []
+        for k in order:
+            if perp_clusters and items[k][3] - items[perp_clusters[-1][-1]][3] <= perp_tol:
+                perp_clusters[-1].append(k)
+            else:
+                perp_clusters.append([k])
+
+        for perp_cluster in perp_clusters:
+            # Sweep-and-merge by along-axis lo within gap_tol.
+            perp_cluster.sort(key=lambda k: items[k][1])
+            cur_members: List[int] = [perp_cluster[0]]
+            cur_lo = items[perp_cluster[0]][1]
+            cur_hi = items[perp_cluster[0]][2]
+            for k in perp_cluster[1:]:
+                lo, hi = items[k][1], items[k][2]
+                if lo - cur_hi <= gap_tol:
+                    cur_members.append(k)
+                    cur_hi = max(cur_hi, hi)
+                else:
+                    _emit(cur_members, cur_lo, cur_hi, axis, type_name, items)
+                    cur_members = [k]
+                    cur_lo, cur_hi = lo, hi
+            _emit(cur_members, cur_lo, cur_hi, axis, type_name, items)
+
+    def _emit(member_ks: List[int],
+              lo: float, hi: float,
+              axis: str, type_name: str,
+              items: List[Tuple[int, float, float, float, float]]) -> None:
+        # Emit a candidate for EVERY along-group, including singletons. The
+        # wrapper relies on the candidates emerging in legacy's iteration
+        # order to assemble the output list in that order; if singletons
+        # were skipped here they'd be left in their original positions and
+        # the resulting segment ordering would break downstream order-
+        # sensitive passes (``t_junction_snap`` / ``truncate_overshoots``
+        # both read mutated state from earlier iterations and so depend
+        # on segment-list ordering).
+        if not member_ks:
+            return
+        # Length-weighted line from each member's OWN length (not union).
+        # IMPORTANT: must use Python's ``sum()`` builtin (NOT a manual
+        # ``+=`` accumulator) to stay bit-identical with legacy
+        # ``vectorize._length_weighted``. From Python 3.12 onward ``sum()``
+        # uses Neumaier compensated summation on float iterables, which
+        # produces a ULP-level different result from a naive ``+=`` loop
+        # for clusters with 4+ members. Legacy uses ``sum(...)`` so we
+        # must too.
+        total_w = sum(max(items[k][4], 1e-6) for k in member_ks)
+        weighted = sum(items[k][3] * max(items[k][4], 1e-6)
+                       for k in member_ks)
+        canon_line = weighted / total_w
+
+        if axis == "h":
+            merged_seg = {"type": type_name,
+                          "x1": lo, "y1": canon_line,
+                          "x2": hi, "y2": canon_line}
+        else:
+            merged_seg = {"type": type_name,
+                          "x1": canon_line, "y1": lo,
+                          "x2": canon_line, "y2": hi}
+
+        remove_idxs = [items[k][0] for k in member_ks]
+        cands.append(C.Candidate(
+            op="merge",
+            add=[merged_seg],
+            remove=remove_idxs,
+            mutate=[],
+            meta={
+                "axis": axis,
+                "type": type_name,
+                "cluster_size": len(member_ks),
+                "merged_len": hi - lo,
+                "canon_line": canon_line,
+            },
+        ))
+
+    for t, idxs in h_buckets.items():
+        _process(idxs, "h", t)
+    for t, idxs in v_buckets.items():
+        _process(idxs, "v", t)
+
+    return cands

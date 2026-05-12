@@ -1732,6 +1732,51 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_cluster_collinear_merge_candidates(
+        lines: List[Dict],
+        *,
+        perp_tol: float,
+        gap_tol: float,
+        ) -> List[Dict]:
+    """Step 8: candidate-based ``merge_collinear``.
+
+    Single-pass apply (NOT the regenerate fixed-point loop used by other
+    merge wrappers): the generator emits one candidate per along-group
+    in the same bucket -> perp-cluster -> along-sweep iteration order
+    legacy uses, including singletons. The output is assembled as
+
+        diagonals (input order) + [c.add[0] for c in cands]
+
+    which is exactly the order legacy's ``merge_collinear`` produces
+    (``out = list(diagonals)`` then ``out.extend(_merge_group(...))``
+    over each H type then each V type). Preserving that order is
+    load-bearing -- downstream ``t_junction_snap`` and
+    ``truncate_overshoots`` iterate segments and mutate ``segs[i]``
+    in place; later iterations read the mutated state from earlier i,
+    so segment-list ordering changes their output.
+
+    The cluster generator is the right structure here (not the pair-
+    based phase 1 generator): phase 1's transitive fixed-point uses
+    union-length weighting after the first merge, which diverges sub-
+    pixel from legacy's own-length weighting on 3+ chain merges. The
+    cluster generator computes the canon_line from every member's own
+    original length in one shot, matching legacy bit-identically.
+
+    No score gate / accept loop: legacy's partition is the entire
+    safety net (geometric gates: same-type + same-axis-bucket + perp
+    cluster within perp_tol + along sweep within gap_tol).
+    """
+    import generators as G
+    if not lines:
+        return list(lines)
+    cands = G.cluster_collinear_merge_candidates(
+        lines, perp_tol=perp_tol, gap_tol=gap_tol)
+    out: List[Dict] = [s for s in lines if _classify_axis(s) == "d"]
+    for cand in cands:
+        out.extend(dict(seg) for seg in cand.add)
+    return out
+
+
 def _accept_2d_cluster_candidates(lines: List[Dict],
                                    *,
                                    tol: float,
@@ -2608,7 +2653,15 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     s1 = _accept_fuse_candidates(s1, fallback_tol=colinear_tol, masks=None)
 
     # (2) Merge collinear same-type segments into a single longest span.
-    s2 = merge_collinear(s1, merge_perp, merge_gap)
+    # Step 8 phase 2: candidate-based cluster_collinear_merge replaces
+    # the legacy ``merge_collinear``. The pair-based phase-1 generator
+    # diverges sub-pixel from legacy on 3+ chain merges (union-length vs
+    # own-length weighting); the cluster-based generator partitions
+    # identically to legacy (bucket -> perp-cluster -> along-sweep) and
+    # emits one Candidate per along-group, so the union of accepted
+    # candidates' output equals legacy's output bit-identically.
+    s2 = _accept_cluster_collinear_merge_candidates(
+        s1, perp_tol=merge_perp, gap_tol=merge_gap)
 
     # (3a) T-junction node-to-edge snap: chromatic endpoints onto wall bodies,
     #      same-type endpoints onto own bodies. Walls never snap to chromatic.
