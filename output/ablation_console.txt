@@ -3,88 +3,84 @@ ABLATION HARNESS ¡X disable one pass at a time, measure delta vs baseline
 ============================================================================================
 
 --- BASELINE ---
-  source.png                                          n= 113  free=  12  diag=  0  wall_sup=0.845  (0.7s)
-  sg2.png                                             n= 128  free=  23  diag=  0  wall_sup=0.733  (1.7s)
-  Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         n= 108  free=  33  diag=  0  wall_sup=0.790  (1.5s)
+  source.png                                          n= 102  free=  12  diag=  0  wall_sup=0.838  (1.0s)
+  sg2.png                                             n= 124  free=  25  diag=  0  wall_sup=0.733  (2.0s)
+  Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         n= 100  free=  39  diag=  0  wall_sup=0.785  (2.0s)
 
 --- ABLATIONS ---
 PASS                         IMAGE                                                dN  dFree  Diag     WS    IOU
 --------------------------------------------------------------------------------------------------------------
-axis_align                   source.png                                           +0     +0     0  0.845  1.000
+axis_align                   source.png                                           +0     +0     0  0.838  1.000
 axis_align                   sg2.png                                              -2     +0     0  0.732  0.987
-axis_align                   Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     +0     0  0.790  1.000
+axis_align                   Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     +0     0  0.785  1.000
 --------------------------------------------------------------------------------------------------------------
-snap_colinear                source.png                                           -8     +9     0  0.856  0.528
-snap_colinear                sg2.png                                              +0     +5     0  0.752  0.434
-snap_colinear                Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +4     +3     0  0.814  0.282
+snap_colinear                source.png                                           -5    +12     0  0.850  0.544
+snap_colinear                sg2.png                                              -1     +6     0  0.749  0.435
+snap_colinear                Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +4     +0     0  0.813  0.283
 --------------------------------------------------------------------------------------------------------------
-merge_collin_1               source.png                                           +2     +0     0  0.840  0.925
-merge_collin_1               sg2.png                                              -2     +0     0  0.767  0.925
-merge_collin_1               Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -3     +1     0  0.776  0.724
+merge_collin_1               source.png                                           +2     +0     0  0.833  0.930
+merge_collin_1               sg2.png                                              -2     +0     0  0.759  0.920
+merge_collin_1               Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     +0     0  0.772  0.718
 --------------------------------------------------------------------------------------------------------------
-t_junction_snap              source.png                                           -3     +1     0  0.855  0.894
-t_junction_snap              sg2.png                                              -8    +10     0  0.747  0.837
-t_junction_snap              Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -3     +2     0  0.780  0.820
+t_junction_snap              source.png                                           -1     +5     0  0.848  0.894
+t_junction_snap              sg2.png                                              -6     +9     0  0.748  0.838
+t_junction_snap              Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -2     +0     0  0.778  0.813
 --------------------------------------------------------------------------------------------------------------
-truncate_overshoots          source.png                                           +0     +0     0  0.845  1.000
-truncate_overshoots          sg2.png                                              -2     +3     0  0.772  0.818
-truncate_overshoots          Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -1     +2     0  0.789  0.946
+truncate_overshoots          source.png                                           +0     +0     0  0.838  1.000
+truncate_overshoots          sg2.png                                              -1     +1     0  0.765  0.827
+truncate_overshoots          Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     +2     0  0.784  0.946
 --------------------------------------------------------------------------------------------------------------
-merge_collin_2               source.png                                           +0     +0     0  0.845  1.000
+merge_collin_2               source.png                                           +0     +0     0  0.838  1.000
 merge_collin_2               sg2.png                                              +0     +0     0  0.752  0.967
-merge_collin_2               Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +1     -2     0  0.789  0.966
+merge_collin_2               Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +1     -2     0  0.783  0.962
 --------------------------------------------------------------------------------------------------------------
-snap_endpoints_1             source.png                                           +8     -2     0  0.827  0.979
-snap_endpoints_1             sg2.png                                              -4     +3     0  0.770  0.823
-snap_endpoints_1             Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +4     +8     0  0.782  0.801
+snap_endpoints_1             source.png                                           +7     +2     0  0.819  0.979
+snap_endpoints_1             sg2.png                                              +2     -1     0  0.755  0.810
+snap_endpoints_1             Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +8     +9     0  0.775  0.776
 --------------------------------------------------------------------------------------------------------------
-manhattan_force_axis         source.png                                           +4     +2     0  0.878  0.885
-manhattan_force_axis         sg2.png                                              -2     +4     0  0.783  0.761
-manhattan_force_axis         Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         -13     +2     0  0.799  0.668
+manhattan_force_axis         source.png                                          +20     +2     5  0.871  0.857
+manhattan_force_axis         sg2.png                                             +15     +2     7  0.726  0.769
+manhattan_force_axis         Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         +32    -11    20  0.762  0.715
 --------------------------------------------------------------------------------------------------------------
-canonical_line               source.png                                           +0     +0     0  0.845  1.000
-canonical_line               sg2.png                                              +1     -1     0  0.733  0.996
-canonical_line               Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +1     +5     0  0.784  0.980
+canonical_line               source.png                                           +0     +0     0  0.838  1.000
+canonical_line               sg2.png                                              +2     -1     0  0.734  0.972
+canonical_line               Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +1     +6     0  0.776  0.979
 --------------------------------------------------------------------------------------------------------------
-manhattan_isect_snap         source.png                                           +0     +0     0  0.845  1.000
-manhattan_isect_snap         sg2.png                                              +0     +0     0  0.733  1.000
-manhattan_isect_snap         Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     +0     0  0.790  1.000
---------------------------------------------------------------------------------------------------------------
-manhattan_t_project          source.png                                           -3     +2     0  0.816  0.983
+manhattan_t_project          source.png                                           -2     +2     0  0.808  0.983
 manhattan_t_project          sg2.png                                              +0     +0     0  0.733  0.996
-manhattan_t_project          Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -1     +0     0  0.789  0.997
+manhattan_t_project          Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     -1     0  0.783  0.992
 --------------------------------------------------------------------------------------------------------------
-cluster_parallel             source.png                                          +21     -1     0  0.912  0.766
-cluster_parallel             sg2.png                                             +33     -2     0  0.707  0.711
-cluster_parallel             Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         +31     -8     0  0.740  0.828
+cluster_parallel             source.png                                          +20     -1     0  0.907  0.766
+cluster_parallel             sg2.png                                             +32     +0     0  0.721  0.705
+cluster_parallel             Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         +16     +3     0  0.743  0.826
 --------------------------------------------------------------------------------------------------------------
-grid_snap_2                  source.png                                           +8     -1     0  0.849  0.983
-grid_snap_2                  sg2.png                                              +4     -1     0  0.741  0.996
-grid_snap_2                  Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -1     +1     0  0.787  1.000
+grid_snap_2                  source.png                                           +8     -1     0  0.840  0.983
+grid_snap_2                  sg2.png                                              +0     +0     0  0.733  1.000
+grid_snap_2                  Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -1     +0     0  0.781  0.996
 --------------------------------------------------------------------------------------------------------------
-t_snap_with_extension        source.png                                           +8     +1     0  0.842  0.985
-t_snap_with_extension        sg2.png                                              +2     +0     0  0.734  0.995
-t_snap_with_extension        Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +2     +2     0  0.788  0.991
+t_snap_with_extension        source.png                                           +7     +9     0  0.835  0.985
+t_snap_with_extension        sg2.png                                              +2     +3     0  0.734  0.995
+t_snap_with_extension        Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +3     +2     0  0.783  0.991
 --------------------------------------------------------------------------------------------------------------
-brute_force_ray              source.png                                           +0     +0     0  0.845  1.000
-brute_force_ray              sg2.png                                              +3     +5     0  0.735  1.000
-brute_force_ray              Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +2     +5     0  0.803  0.976
+brute_force_ray              source.png                                           +0     +0     0  0.838  1.000
+brute_force_ray              sg2.png                                              +2     +5     0  0.734  1.000
+brute_force_ray              Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +1     +9     0  0.797  0.976
 --------------------------------------------------------------------------------------------------------------
-insert_connectors            source.png                                           -6     +6     0  0.865  0.964
-insert_connectors            sg2.png                                              -7     +8     0  0.727  0.996
-insert_connectors            Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         -12     +9     0  0.780  1.000
+insert_connectors            source.png                                           -3     +6     0  0.860  0.964
+insert_connectors            sg2.png                                              -3     +5     0  0.730  0.996
+insert_connectors            Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          -8     +4     0  0.777  1.000
 --------------------------------------------------------------------------------------------------------------
-proximal_bridge              source.png                                          -20     +4     0  0.837  1.000
-proximal_bridge              sg2.png                                             -21     +7     0  0.719  0.997
-proximal_bridge              Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         -17     +3     0  0.774  1.000
+proximal_bridge              source.png                                           -9     +4     0  0.837  1.000
+proximal_bridge              sg2.png                                             -19     +7     0  0.720  0.997
+proximal_bridge              Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png         -11     +1     0  0.771  1.000
 --------------------------------------------------------------------------------------------------------------
-fuse_close_endpoints         source.png                                           +0    +11     0  0.858  0.894
-fuse_close_endpoints         sg2.png                                              +0     +9     0  0.752  0.975
-fuse_close_endpoints         Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0    +12     0  0.790  0.986
+fuse_close_endpoints         source.png                                           +2    +10     0  0.852  0.894
+fuse_close_endpoints         sg2.png                                              +0     +1     0  0.757  0.950
+fuse_close_endpoints         Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +1     +4     0  0.786  0.989
 --------------------------------------------------------------------------------------------------------------
-manhattan_merge_4            source.png                                           +0     +0     0  0.845  1.000
-manhattan_merge_4            sg2.png                                              +2     +0     0  0.733  1.000
-manhattan_merge_4            Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +0     +0     0  0.790  1.000
+merge_final                  source.png                                          +11     +0     0  0.845  1.000
+merge_final                  sg2.png                                              +3     +0     0  0.734  1.000
+merge_final                  Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png          +6     -4     0  0.789  1.000
 --------------------------------------------------------------------------------------------------------------
 
 CSV: c:\Users\102460\Desktop\senao\analyzeToVec\output\ablation_report.csv
@@ -93,22 +89,21 @@ CSV: c:\Users\102460\Desktop\senao\analyzeToVec\output\ablation_report.csv
 
 PASS                          max|dN|  max|dFree|   min IOU   WS drop
 ----------------------------------------------------------------------
-manhattan_isect_snap                0           0    1.0000    0.0000  <-- NO-OP across all 3 images
-manhattan_merge_4                   2           0    1.0000    0.0000  <-- minimal impact
-proximal_bridge                    21           7    0.9966    0.0386
-axis_align                          2           0    0.9869    0.0009
-t_snap_with_extension               8           2    0.9850    0.0055
-manhattan_t_project                 3           2    0.9832    0.0314
-grid_snap_2                         8           1    0.9832    0.0032
-canonical_line                      1           5    0.9796    0.0070
-brute_force_ray                     3           5    0.9756    0.0000
-merge_collin_2                      1           2    0.9657    0.0014
-insert_connectors                  12           9    0.9636    0.0167
-fuse_close_endpoints                0          12    0.8936    0.0000
-t_junction_snap                     8          10    0.8197    0.0101
-truncate_overshoots                 2           3    0.8185    0.0013
-snap_endpoints_1                    8           8    0.8010    0.0269
-merge_collin_1                      3           1    0.7239    0.0196
-cluster_parallel                   33           8    0.7111    0.0768
-manhattan_force_axis               13           4    0.6682    0.0000
-snap_colinear                       8           9    0.2819    0.0000
+merge_final                        11           4    1.0000    0.0000
+proximal_bridge                    19           7    0.9966    0.0266
+axis_align                          2           0    0.9869    0.0010
+t_snap_with_extension               7           9    0.9850    0.0052
+manhattan_t_project                 2           2    0.9832    0.0325
+grid_snap_2                         8           1    0.9832    0.0034
+brute_force_ray                     2           9    0.9756    0.0000
+canonical_line                      2           6    0.9721    0.0089
+insert_connectors                   8           6    0.9636    0.0105
+merge_collin_2                      1           2    0.9619    0.0014
+fuse_close_endpoints                2          10    0.8936    0.0000
+truncate_overshoots                 1           2    0.8269    0.0010
+t_junction_snap                     6           9    0.8135    0.0066
+snap_endpoints_1                    8           9    0.7761    0.0289
+merge_collin_1                      2           0    0.7179    0.0182
+manhattan_force_axis               32          11    0.7150    0.0291
+cluster_parallel                   32           3    0.7053    0.0539
+snap_colinear                       5          12    0.2827    0.0000

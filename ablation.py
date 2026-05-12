@@ -36,11 +36,15 @@ REF_IMAGES = [
 
 PASSES: List[Tuple[str, str]] = [
     # (id, human-readable description). Mirrors the current vectorize_bgr
-    # geometric-optimisation pipeline (step 4.9.6 state). Two former
-    # ``manhattan_ultimate_merge`` calls (post-watertight, post-gap-close)
-    # were removed in step 4.8 after ablation showed them NO-OP across all
-    # 3 reference images. ``canonical_line`` (step 4.9.2) and
-    # ``proximal_bridge`` (step 4.7) are now ablation-testable.
+    # geometric-optimisation pipeline (step 6 phase 3 state). Notes:
+    #   - ``manhattan_intersection_snap`` removed step 4.9.7 (pure NO-OP
+    #     post canonical_line + thickness-aware manhattan_t_project)
+    #   - ``cluster_parallel`` is now the step 6 phase 3 candidate-based
+    #     ``_accept_parallel_merge_candidates(skip_score=True)``
+    #   - ``merge_final`` is the step 6 phase 1 candidate-based
+    #     ``_accept_merge_candidates(perp_tol=0, gap_tol=0,
+    #     junction_aware=True)`` (was ``manhattan_merge_4`` in older
+    #     ablation runs)
     ("axis_align",            "axis_align_segments"),
     ("snap_colinear",         "snap_colinear_coords"),
     ("merge_collin_1",        "merge_collinear (pre-T/L)"),
@@ -50,16 +54,15 @@ PASSES: List[Tuple[str, str]] = [
     ("snap_endpoints_1",      "snap_endpoints"),
     ("manhattan_force_axis",  "manhattan_force_axis"),
     ("canonical_line",        "canonicalize_offsets (step 4.9.2)"),
-    ("manhattan_isect_snap",  "manhattan_intersection_snap"),
     ("manhattan_t_project",   "manhattan_t_project"),
-    ("cluster_parallel",      "cluster_parallel_duplicates"),
+    ("cluster_parallel",      "_accept_parallel_merge_candidates (step 6 phase 3)"),
     ("grid_snap_2",           "grid_snap_endpoints"),
     ("t_snap_with_extension", "t_snap_with_extension (candidate)"),
     ("brute_force_ray",       "brute_force_ray_extend (candidate)"),
     ("insert_connectors",     "insert_missing_connectors (candidate)"),
     ("proximal_bridge",       "_accept_bridge_candidates (step 4.7)"),
     ("fuse_close_endpoints",  "fuse_close_endpoints"),
-    ("manhattan_merge_4",     "manhattan_ultimate_merge (final)"),
+    ("merge_final",           "_accept_merge_candidates (step 6 phase 1)"),
 ]
 
 
@@ -129,12 +132,16 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
     if disabled != "canonical_line":
         s = V.canonicalize_offsets(s, wall_mask=masks.get("wall"),
                                    attach_thickness=True)
-    if disabled != "manhattan_isect_snap":
-        s = V.manhattan_intersection_snap(s, t["manhattan"], masks=masks)
+    # manhattan_intersection_snap call removed step 4.9.7 (pure NO-OP)
     if disabled != "manhattan_t_project":
         s = V.manhattan_t_project(s, t["manhattan"], masks=masks)
     if disabled != "cluster_parallel":
-        s = V.cluster_parallel_duplicates(s, t["parallel_merge"])
+        # Step 6 phase 3: candidate-based parallel merge (skip_score=True).
+        s = V._accept_parallel_merge_candidates(
+            s, perp_tol=t["parallel_merge"], skip_score=True,
+            wall_evidence=None,
+            door_mask=masks.get("door"),
+            window_mask=masks.get("window"))
     if disabled != "grid_snap_2":
         s = V.grid_snap_endpoints(s, t["grid_snap"])
     if disabled != "t_snap_with_extension":
@@ -157,8 +164,13 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
     if disabled != "fuse_close_endpoints":
         V.fuse_close_endpoints(s, t["ray_fuse"], masks=masks)
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
-    if disabled != "manhattan_merge_4":
-        s = V.manhattan_ultimate_merge(s)
+    if disabled != "merge_final":
+        # Step 6 phase 1: candidate-based final merge.
+        s = V._accept_merge_candidates(
+            s, perp_tol=0.0, gap_tol=0.0, junction_aware=True,
+            wall_evidence=None,
+            door_mask=masks.get("door"),
+            window_mask=masks.get("window"))
     # Strip pipeline-internal fields so segments serialise back to canonical
     # {type, x1, y1, x2, y2} like vectorize_bgr's tail does.
     for seg in s:
