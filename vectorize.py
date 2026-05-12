@@ -27,7 +27,7 @@ import networkx as nx
 import numpy as np
 from skimage.morphology import skeletonize
 
-from canonical_line import canonicalize_offsets
+from canonical_line import canonicalize_offsets, compute_local_thickness
 
 # Segment fields that are pipeline-internal — computed and used inside
 # vectorize_bgr but stripped before the result leaves this module. Keeps
@@ -993,7 +993,75 @@ def _seg_axis_strict(seg: Dict) -> str:
     return "h" if seg["y1"] == seg["y2"] else "v"
 
 
-def manhattan_intersection_snap(segments: List[Dict], tol: float) -> List[Dict]:
+# ---------------------------------------------------------------------------
+# Step 4.9.4: thickness-aware snap tolerance
+# ---------------------------------------------------------------------------
+#
+# A snap pulls one segment's endpoint onto another segment's line (or onto
+# a shared corner). The geometrically meaningful tolerance for that pull
+# is "how far into the host wall's body can the endpoint be drawn?" — i.e.
+# proportional to the host wall's physical thickness. A 4 px thin partition
+# should not attract an endpoint that is 12 px away (clearly belongs to a
+# different wall); a 12 px thick load-bearing wall can legitimately pull a
+# 4 px endpoint that happens to land near its edge.
+#
+# Per-segment tol = clamp(0.25 * local_thickness, 2, 6). Floor 2 px so
+# sub-pixel drift always snaps; ceiling 6 px so genuinely separate walls
+# can't be fused. ``compute_local_thickness`` samples the distance
+# transform along a segment's body, taking the median of interior samples
+# (>0.5 dt) so junction holes don't pull thick walls down. Door / window
+# centerlines sit outside the wall mask so they sample as -1 and the
+# caller falls back to ``fallback_tol`` (3.0).
+
+def _thickness_aware_tol(thickness: float,
+                         *,
+                         abs_min: float = 2.0,
+                         abs_max: float = 6.0,
+                         thickness_frac: float = 0.25,
+                         fallback: float = 3.0) -> float:
+    """Step 4.9.4 per-segment snap tolerance from local wall thickness."""
+    if thickness > 0:
+        return max(abs_min, min(abs_max, thickness_frac * thickness))
+    return fallback
+
+
+def _compute_seg_tols(segments: List[Dict],
+                      masks: Optional[Dict[str, np.ndarray]] = None,
+                      *,
+                      fallback: float = 3.0) -> List[float]:
+    """Build a per-segment list of step-4.9.4 thickness-aware tols.
+
+    Each segment is sampled against its OWN type's mask DT (a wall samples
+    wall mask, a door samples door mask) — using the wrong-type mask would
+    score zero interior and force every chromatic segment to the fallback.
+    The per-type DT is computed once per call and cached locally; callers
+    that hit multiple snap functions in sequence pay the cost three times,
+    which is acceptable on the regression images (DT on 2048x2048 in ~5 ms).
+    """
+    if not segments:
+        return []
+    if masks is None:
+        return [fallback] * len(segments)
+    dts: Dict[str, np.ndarray] = {}
+    for t, m in masks.items():
+        if m is not None and m.size > 0:
+            dts[t] = cv2.distanceTransform((m > 0).astype(np.uint8),
+                                           cv2.DIST_L2, 3)
+    out: List[float] = []
+    for s in segments:
+        dt = dts.get(s["type"])
+        if dt is None:
+            out.append(fallback)
+            continue
+        th = compute_local_thickness(s, dt)
+        out.append(_thickness_aware_tol(th, fallback=fallback))
+    return out
+
+
+def manhattan_intersection_snap(segments: List[Dict], tol: float,
+                                *,
+                                masks: Optional[Dict[str, np.ndarray]] = None
+                                ) -> List[Dict]:
     """Step 2: for every (H, V) pair whose closest endpoints are within tol,
     overwrite both endpoints with the EXACT mathematical intersection
     (V.x, H.y). No coordinate averaging — the H's y stays the H's y, the
@@ -1002,10 +1070,21 @@ def manhattan_intersection_snap(segments: List[Dict], tol: float) -> List[Dict]:
     Wall-priority is enforced indirectly: an H wall and a V door meeting
     at a corner end up with the corner at (V.x, H.y) — the wall's axis line
     is never moved, the door's endpoints align onto it.
+
+    Step 4.9.4: when ``masks`` is given, the per-pair tolerance becomes
+    ``min(tol_h, tol_v)`` with each ``tol_i = clamp(0.25 * local_thickness,
+    2, 6)``. The ``tol`` argument is the fallback used when a segment's
+    thickness can't be sampled (chromatic on wall mask, or too-short
+    segments). Strict ``min`` is correct here: an H endpoint snap moves it
+    laterally toward V's body (so V's thickness governs how far it may be
+    drawn), AND the V endpoint snap moves it laterally toward H's body (so
+    H's thickness governs symmetrically) — both must consent.
     """
     segs = [dict(s) for s in segments]
     n = len(segs)
     axis = [_seg_axis_strict(s) for s in segs]
+    tols = _compute_seg_tols(segs, masks, fallback=tol) if masks is not None \
+        else [tol] * n
 
     for i in range(n):
         if axis[i] != "h":
@@ -1017,6 +1096,7 @@ def manhattan_intersection_snap(segments: List[Dict], tol: float) -> List[Dict]:
                 continue
             v = segs[j]
             v_x = v["x1"]
+            pair_tol = min(tols[i], tols[j])
 
             # Closest endpoints to (v_x, h_y).
             h_ends = (("1", h["x1"], h_y), ("2", h["x2"], h_y))
@@ -1026,7 +1106,7 @@ def manhattan_intersection_snap(segments: List[Dict], tol: float) -> List[Dict]:
 
             dh = abs(h_end[1] - v_x)   # H endpoint's distance to the intersection x
             dv = abs(v_end[2] - h_y)   # V endpoint's distance to the intersection y
-            if dh > tol or dv > tol:
+            if dh > pair_tol or dv > pair_tol:
                 continue
 
             # Wall-priority: if H is wall and V is chromatic, the V's nearest
@@ -1041,7 +1121,10 @@ def manhattan_intersection_snap(segments: List[Dict], tol: float) -> List[Dict]:
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
-def manhattan_t_project(segments: List[Dict], tol: float) -> List[Dict]:
+def manhattan_t_project(segments: List[Dict], tol: float,
+                        *,
+                        masks: Optional[Dict[str, np.ndarray]] = None
+                        ) -> List[Dict]:
     """Step 3: T-junction projection.
 
     For every endpoint, scan every orthogonal segment whose body the
@@ -1052,10 +1135,23 @@ def manhattan_t_project(segments: List[Dict], tol: float) -> List[Dict]:
 
     Wall-priority: walls never project onto chromatic trunks (TYPE_PRIORITY).
     The trunk segment is never modified.
+
+    Step 4.9.4: when ``masks`` is given, the per-pair tolerance becomes
+    the trunk's thickness-aware tol ``clamp(0.25 * trunk_thickness, 2, 6)``.
+    The trunk's thickness is the geometrically correct gate here: the
+    endpoint moves perpendicular to the trunk's body axis, so "how far
+    into the trunk's body the endpoint may be pulled" is set by the trunk.
+    The probing segment's own thickness is irrelevant — only its endpoint
+    is moving, the body stays put. The body-extent guard ``lo - tol <= ey
+    <= hi + tol`` keeps using the trunk's own tol (along-axis slack, same
+    rationale: how far past the trunk's end can we count as "on the
+    trunk's line").
     """
     segs = [dict(s) for s in segments]
     n = len(segs)
     axis = [_seg_axis_strict(s) for s in segs]
+    tols = _compute_seg_tols(segs, masks, fallback=tol) if masks is not None \
+        else [tol] * n
 
     for i in range(n):
         seg = segs[i]
@@ -1064,7 +1160,10 @@ def manhattan_t_project(segments: List[Dict], tol: float) -> List[Dict]:
             ex = seg[f"x{end}"]
             ey = seg[f"y{end}"]
             best = None
-            best_d = tol
+            # Cross-trunk tie-breaker only: each trunk gates with its own
+            # ``trunk_tol`` below (``d <= trunk_tol``), so ``best_d`` just
+            # tracks the closest accepted candidate across trunks.
+            best_d = float("inf")
             for j in range(n):
                 if i == j:
                     continue
@@ -1075,23 +1174,24 @@ def manhattan_t_project(segments: List[Dict], tol: float) -> List[Dict]:
                         < TYPE_PRIORITY.get(segs[j]["type"], 99)):
                     continue
                 trunk = segs[j]
+                trunk_tol = tols[j]
                 if axis[j] == "v":
                     line_x = trunk["x1"]
                     lo, hi = sorted((trunk["y1"], trunk["y2"]))
                     # Endpoint y must lie within the trunk's body (with tol).
-                    if not (lo - tol <= ey <= hi + tol):
+                    if not (lo - trunk_tol <= ey <= hi + trunk_tol):
                         continue
                     d = abs(ex - line_x)
-                    if d < best_d:
+                    if d <= trunk_tol and d < best_d:
                         best_d = d
                         best = (line_x, ey)  # exact projection
                 else:  # trunk is horizontal
                     line_y = trunk["y1"]
                     lo, hi = sorted((trunk["x1"], trunk["x2"]))
-                    if not (lo - tol <= ex <= hi + tol):
+                    if not (lo - trunk_tol <= ex <= hi + trunk_tol):
                         continue
                     d = abs(ey - line_y)
-                    if d < best_d:
+                    if d <= trunk_tol and d < best_d:
                         best_d = d
                         best = (ex, line_y)
             if best is not None:
@@ -2132,44 +2232,65 @@ def insert_missing_connectors(lines: List[Dict],
     lines.extend(current)
 
 
-def fuse_close_endpoints(lines: List[Dict], tol: float) -> None:
+def fuse_close_endpoints(lines: List[Dict], tol: float,
+                         *,
+                         masks: Optional[Dict[str, np.ndarray]] = None
+                         ) -> None:
     """Mutate `lines` IN PLACE: cluster all endpoint x's within tol to a
     single canonical x (and same for y's). After this every endpoint that
     was within `tol` of another shares the EXACT same coordinate.
 
     Wall-priority: when a cluster contains both a wall coordinate and a
     chromatic coordinate, the wall coordinate wins.
+
+    Step 4.9.4: when ``masks`` is given, each endpoint carries its host
+    segment's thickness-aware tol ``clamp(0.25 * local_thickness, 2, 6)``.
+    The sort-and-walk cluster uses the *minimum* of two neighbours' tols
+    as the join threshold — strict, so a thin partition doesn't get glued
+    to a separate thick wall just because the thick wall has high tol.
+    The cluster's canonical coordinate still uses wall-priority mean (a
+    cluster with one wall and several door coords resolves to the wall x
+    even though the doors have tighter tols).
     """
     if not lines:
         return
 
-    # Collect all endpoint coordinates with their owning segment's type.
-    xs: List[Tuple[float, str]] = []
-    ys: List[Tuple[float, str]] = []
-    for s in lines:
-        xs.append((s["x1"], s["type"]))
-        xs.append((s["x2"], s["type"]))
-        ys.append((s["y1"], s["type"]))
-        ys.append((s["y2"], s["type"]))
+    # Build per-segment thickness tols once. The clusters need per-endpoint
+    # access, so duplicate each segment's tol into its two endpoint entries.
+    seg_tols = _compute_seg_tols(lines, masks, fallback=tol) \
+        if masks is not None else [tol] * len(lines)
 
-    def _cluster(tagged: List[Tuple[float, str]]) -> Dict[Tuple[float, str], float]:
+    # Collect all endpoint coordinates with their owning segment's type
+    # and the per-endpoint tol.
+    xs: List[Tuple[float, str, float]] = []
+    ys: List[Tuple[float, str, float]] = []
+    for s, st in zip(lines, seg_tols):
+        xs.append((s["x1"], s["type"], st))
+        xs.append((s["x2"], s["type"], st))
+        ys.append((s["y1"], s["type"], st))
+        ys.append((s["y2"], s["type"], st))
+
+    def _cluster(tagged: List[Tuple[float, str, float]]
+                 ) -> Dict[Tuple[float, str], float]:
         if not tagged:
             return {}
         order = sorted(tagged, key=lambda p: p[0])
-        clusters: List[List[Tuple[float, str]]] = [[order[0]]]
+        clusters: List[List[Tuple[float, str, float]]] = [[order[0]]]
         for v in order[1:]:
-            if v[0] - clusters[-1][-1][0] <= tol:
+            prev = clusters[-1][-1]
+            join_tol = min(v[2], prev[2])
+            if v[0] - prev[0] <= join_tol:
                 clusters[-1].append(v)
             else:
                 clusters.append([v])
         mapping: Dict[Tuple[float, str], float] = {}
         for grp in clusters:
-            prios = [TYPE_PRIORITY.get(t, 99) for _, t in grp]
+            prios = [TYPE_PRIORITY.get(t, 99) for _, t, _ in grp]
             top = min(prios)
-            anchors = [val for (val, t), p in zip(grp, prios) if p == top]
+            anchors = [val for (val, t, _), p in zip(grp, prios) if p == top]
             canon = float(np.mean(anchors))
-            for entry in grp:
-                mapping[entry] = canon
+            for val, t, _ in grp:
+                mapping[(val, t)] = canon
         return mapping
 
     xmap = _cluster(xs)
@@ -2547,10 +2668,14 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #       of N nominally-distinct lines all within 3 px of each other.
     s6 = canonicalize_offsets(s6, wall_mask=masks.get("wall"),
                               attach_thickness=True)
-    # (b) Intersection-based L-corner snap.
-    s6 = manhattan_intersection_snap(s6, manhattan_tol)
-    # (c) T-junction projection onto orthogonal trunks.
-    s6 = manhattan_t_project(s6, manhattan_tol)
+    # (b) Intersection-based L-corner snap. Step 4.9.4: per-pair tol
+    #     comes from each segment's local wall thickness; the legacy
+    #     ``manhattan_tol`` (15 px * scale) is now only the fallback for
+    #     segments whose thickness can't be sampled.
+    s6 = manhattan_intersection_snap(s6, manhattan_tol, masks=masks)
+    # (c) T-junction projection onto orthogonal trunks. Step 4.9.4: tol
+    #     scales with the trunk's local thickness, fallback ``manhattan_tol``.
+    s6 = manhattan_t_project(s6, manhattan_tol, masks=masks)
     # (d) Ultimate collinear merge: post-step-4.7 ablation confirmed this
     #     first manhattan_ultimate_merge call is NO-OP after the upstream
     #     passes had their inputs unchanged by step 4 / 4.6 / 4.7 — the
@@ -2640,7 +2765,10 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Final 2-px endpoint fusion: snap any near-coincident endpoints to one
     # canonical (wall-priority) coordinate so micro-deltas vanish.
-    fuse_close_endpoints(snapped, ray_fuse)
+    # Step 4.9.4: per-endpoint tol is thickness-aware; ``ray_fuse`` is the
+    # fallback only (and is below the 2 px floor anyway, so in practice
+    # every endpoint resolves via clamp(0.25*thickness, 2, 6)).
+    fuse_close_endpoints(snapped, ray_fuse, masks=masks)
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # One last collinear merge in case ray extension produced overlapping
     # spans that can now coalesce.
