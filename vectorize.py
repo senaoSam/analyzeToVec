@@ -1465,6 +1465,78 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_canonicalize_offset_candidates(
+        lines: List[Dict],
+        *,
+        wall_mask: Optional[np.ndarray] = None,
+        abs_min: float = 2.0,
+        abs_max: float = 6.0,
+        thickness_frac: float = 0.25,
+        fallback_tol: float = 3.0,
+        attach_thickness: bool = False,
+        ) -> List[Dict]:
+    """Step 9 phase 3: candidate-based ``canonicalize_offsets``.
+
+    The wrapper handles two side-channels that the candidate API
+    doesn't natively support:
+
+      1. ``attach_thickness=True``: legacy attaches a ``local_thickness``
+         field to *every* output segment, not only those in a cluster.
+         apply_candidate's mutate writes existing fields; new fields
+         must be added by the wrapper after candidate apply.
+
+      2. Distance transform / per-segment thickness computation: legacy
+         computes the DT once and samples it once per segment. The
+         candidate generator needs the thicknesses to pick its adaptive
+         tol, so the wrapper computes them up front and threads them
+         through.
+
+    No score gate, no fixed-point loop: clusters are disjoint by the
+    legacy partition, batch apply is correct.
+    """
+    import candidates as C
+    import generators as G
+    from canonical_line import compute_local_thickness as _local_thickness
+
+    if not lines:
+        return list(lines)
+
+    # Single distance-transform compute (matches legacy: one DT per call).
+    if wall_mask is not None and wall_mask.size > 0:
+        dt = cv2.distanceTransform((wall_mask > 0).astype(np.uint8),
+                                   cv2.DIST_L2, 3)
+    else:
+        dt = None
+    thicknesses = [_local_thickness(s, dt) for s in lines]
+
+    cands = G.canonicalize_offset_candidates(
+        lines,
+        thicknesses=thicknesses,
+        abs_min=abs_min, abs_max=abs_max,
+        thickness_frac=thickness_frac, fallback_tol=fallback_tol,
+    )
+
+    current = list(lines)
+    for cand in cands:
+        current = C.apply_candidate(current, cand)
+
+    if not attach_thickness:
+        return current
+
+    # Attach local_thickness field. Note: ``current`` segments may be
+    # different dict instances than ``lines`` due to apply_candidate's
+    # mutation-via-deepcopy, but their index alignment is preserved
+    # (cluster candidates only mutate, never remove or add) so each
+    # ``current[i]`` corresponds to ``lines[i]`` and therefore to
+    # ``thicknesses[i]``.
+    out: List[Dict] = []
+    for i, seg in enumerate(current):
+        ns = dict(seg) if "local_thickness" not in seg else seg
+        ns["local_thickness"] = thicknesses[i]
+        out.append(ns)
+    return out
+
+
 def _accept_truncate_overshoot_candidates(lines: List[Dict],
                                             *,
                                             tol: float,
@@ -2531,8 +2603,14 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #       pieces of one wall. Running it before T / L snap means those
     #       passes see a single canonical line per logical wall, instead
     #       of N nominally-distinct lines all within 3 px of each other.
-    s6 = canonicalize_offsets(s6, wall_mask=masks.get("wall"),
-                              attach_thickness=True)
+    # Step 9 phase 3: candidate-based wrapper around the same offset-
+    # cluster + length-weighted-median algorithm. Per (type, axis)
+    # bucket -> adaptive thickness-aware tol -> 1D cluster -> mutate
+    # all member perp coords to canonical. ``attach_thickness`` is
+    # handled by the wrapper as a post-step (apply_candidate doesn't
+    # add new fields).
+    s6 = _accept_canonicalize_offset_candidates(
+        s6, wall_mask=masks.get("wall"), attach_thickness=True)
     # (b) Intersection-based L-corner snap removed in step 4.9.7 (post-
     #     ablation cleanup): with canonicalize_offsets above and thickness-
     #     aware tols in manhattan_t_project below, ablation on source/sg2

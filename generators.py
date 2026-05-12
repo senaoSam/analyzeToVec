@@ -1361,3 +1361,139 @@ def truncate_overshoot_candidates(segments: List[Dict],
             meta={"endpoint_key": (i, end)},
         ))
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 9 phase 3: canonicalize_offset_candidates  (replaces canonicalize_offsets)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``canonicalize_offsets``: per (type, axis) bucket, 1D-cluster
+# segments by their perp offset (y for H, x for V) within an adaptive
+# thickness-aware tol; per cluster, the offset of every member is
+# rewritten to the length-weighted MEDIAN of the cluster.
+#
+# Two key differences vs ``endpoint_fuse_candidates``:
+#   1. operates on SEGMENT perp offsets (not endpoint coords). For an H
+#      segment both y1 and y2 carry the same offset; mutate both to
+#      preserve the H invariant
+#   2. canonical is length-weighted MEDIAN (the offset value whose
+#      cumulative length first crosses 50% of cluster total), not mean.
+#      Robust against short-stub outliers next to a long wall
+#
+# The ``attach_thickness=True`` side-channel (which writes a
+# ``local_thickness`` field onto every output segment for downstream
+# thickness-aware-tol consumers) is handled by the wrapper -- the
+# candidate API doesn't add fields, only mutates existing ones.
+
+def canonicalize_offset_candidates(segments: List[Dict],
+                                    *,
+                                    thicknesses: Sequence[float],
+                                    abs_min: float = 2.0,
+                                    abs_max: float = 6.0,
+                                    thickness_frac: float = 0.25,
+                                    fallback_tol: float = 3.0,
+                                    ) -> List[C.Candidate]:
+    """Emit one mutate-only candidate per offset cluster (>=2 members).
+
+    Args:
+        segments: full segment list.
+        thicknesses: per-segment local thickness (length must match
+            ``segments``). Caller computes from the wall-mask distance
+            transform once and reuses for tol computation.
+        abs_min, abs_max: clamp range for the adaptive perp-cluster tol.
+        thickness_frac: ``tol = thickness_frac * median(group thickness)``,
+            clamped.
+        fallback_tol: applied when no group thickness is computable.
+    """
+    if not segments:
+        return []
+    if len(thicknesses) != len(segments):
+        raise ValueError("thicknesses must align with segments")
+
+    # Bucket by (type, axis).
+    by_key: Dict[Tuple[str, str], List[int]] = {}
+    for i, seg in enumerate(segments):
+        ax = _axis_of(seg)
+        if ax in ("h", "v"):
+            by_key.setdefault((seg.get("type", ""), ax), []).append(i)
+
+    cands: List[C.Candidate] = []
+
+    for (_type, ax), idxs in by_key.items():
+        if len(idxs) < 2:
+            continue
+        # items[k] = (orig_idx, offset, length, thickness)
+        items = []
+        for i in idxs:
+            seg = segments[i]
+            if ax == "h":
+                off = float(seg["y1"])
+                length = abs(float(seg["x2"]) - float(seg["x1"]))
+            else:
+                off = float(seg["x1"])
+                length = abs(float(seg["y2"]) - float(seg["y1"]))
+            items.append((i, off, length, float(thicknesses[i])))
+
+        # Adaptive tol from in-group thicknesses.
+        valid_th = [it[3] for it in items if it[3] > 0]
+        if valid_th:
+            med = float(np.median(valid_th))
+            tol = max(abs_min, min(abs_max, thickness_frac * med))
+        else:
+            tol = max(abs_min, min(abs_max, fallback_tol))
+
+        items.sort(key=lambda it: it[1])
+        clusters: List[List[Tuple[int, float, float, float]]] = [[items[0]]]
+        for it in items[1:]:
+            if it[1] - clusters[-1][-1][1] <= tol:
+                clusters[-1].append(it)
+            else:
+                clusters.append([it])
+
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            # Length-weighted median (legacy ``_length_weighted_median``):
+            # sort by offset, walk cumulative length, return the offset
+            # whose cumulative weight first crosses 50% of total.
+            pairs = sorted(((c[1], max(c[2], 1e-6)) for c in cluster),
+                           key=lambda p: p[0])
+            total = sum(L for _, L in pairs)
+            half = 0.5 * total
+            cum = 0.0
+            canonical = pairs[-1][0]
+            for off, L in pairs:
+                cum += L
+                if cum >= half:
+                    canonical = off
+                    break
+
+            mutates: List[Tuple[int, str, float, float]] = []
+            for (i, off, _len, _th) in cluster:
+                if abs(off - canonical) <= 1e-9:
+                    continue
+                seg = segments[i]
+                if ax == "h":
+                    # Mutate both endpoints' y to canonical; keep x's.
+                    mutates.append((i, "1", float(seg["x1"]), canonical))
+                    mutates.append((i, "2", float(seg["x2"]), canonical))
+                else:
+                    mutates.append((i, "1", canonical, float(seg["y1"])))
+                    mutates.append((i, "2", canonical, float(seg["y2"])))
+            if not mutates:
+                continue
+            cands.append(C.Candidate(
+                op="canonical_offset",
+                add=[],
+                remove=[],
+                mutate=mutates,
+                meta={
+                    "axis": ax,
+                    "type": _type,
+                    "canonical": canonical,
+                    "cluster_size": len(cluster),
+                    "tol_used": tol,
+                },
+            ))
+
+    return cands
