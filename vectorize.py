@@ -2881,7 +2881,18 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     s1 = axis_align_segments(typed_segments, AXIS_SNAP_DEG)
     # Tight wall-anchored coordinate cluster so colinear walls share an x or y,
     # without dragging genuinely-distinct walls together.
-    s1 = snap_colinear_coords(s1, colinear_tol)
+    # Step 7 phase 4: candidate-based wrapper around the same 1D cluster
+    # logic. ``snap_colinear_coords`` and ``fuse_close_endpoints`` share
+    # the exact 1D-cluster-per-axis algorithm; the only difference is tol
+    # source (fixed colinear_tol vs thickness-aware). Passing
+    # ``masks=None`` plus a uniform ``fallback_tol = colinear_tol``
+    # reproduces snap_colinear_coords exactly via the phase-1 generator.
+    # Despite running pre-canonical (where step 6 phase 2 found the
+    # candidate / score pattern fragile for *merge*), the fuse generator
+    # uses ``skip_score=True`` -- only the geometric gate matters, which
+    # is identical between the legacy 1D cluster and the candidate-based
+    # one.
+    s1 = _accept_fuse_candidates(s1, fallback_tol=colinear_tol, masks=None)
 
     # (2) Merge collinear same-type segments into a single longest span.
     s2 = merge_collinear(s1, merge_perp, merge_gap)
