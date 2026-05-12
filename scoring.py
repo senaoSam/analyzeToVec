@@ -307,9 +307,81 @@ def duplicate_penalty(segments: Sequence[Dict],
     return n_overlap
 
 
-def junction_count(segments: Sequence[Dict]) -> int:
-    """Number of degree-3 or higher nodes — proxy for watertight closure."""
-    return sum(1 for v in _node_degree_counter(segments).values() if v >= 3)
+def junction_count(segments: Sequence[Dict],
+                   *,
+                   wall_mask: Optional[np.ndarray] = None,
+                   ) -> float:
+    """Number of physical T-junctions (degree-3+ node clusters).
+
+    Legacy (``wall_mask=None``): counts every distinct rounded-coord
+    node with degree >= 3 separately. This over-counts the
+    "thick-wall ridge artefact": when skeletonisation produces two
+    parallel centerlines for one thick wall, each ridge has its own
+    apparent T-junction where it meets an orthogonal trunk; legacy
+    counts both, so collapsing the two ridges into one merged
+    centerline (which preserves the same physical T) appears to
+    *lose* one junction and the score penalises the merge.
+
+    Thick-wall-aware (``wall_mask`` provided): cluster junction nodes
+    that lie within local wall half-thickness of each other (sampled
+    from the distance transform). Each cluster counts as one physical
+    junction. Two ridges' T-nodes at (x, y0) and (x, y1) with
+    ``|y1 - y0| <= half_thickness`` collapse into one physical
+    junction; merging the ridges leaves the count unchanged.
+
+    Half-thickness sampling: ``2 * dt[y, x]`` at the junction point
+    gives the full local wall thickness; we use ``0.5 * max(t_i, t_j)``
+    as the per-pair clustering radius so a thin partition with a thick
+    wall's T-node nearby doesn't drag the partition's apparent junction
+    into the thick wall's cluster.
+    """
+    nodes = _node_degree_counter(segments)
+    pts = [pt for pt, d in nodes.items() if d >= 3]
+    if not pts:
+        return 0.0
+    if wall_mask is None or wall_mask.size == 0:
+        return float(len(pts))
+
+    import cv2
+    dt = cv2.distanceTransform((wall_mask > 0).astype(np.uint8),
+                               cv2.DIST_L2, 3)
+    h, w = dt.shape
+    thicknesses: List[float] = []
+    for (x, y) in pts:
+        xi = int(min(max(x, 0), w - 1))
+        yi = int(min(max(y, 0), h - 1))
+        # 2 * dt = full local wall thickness at that point. If the
+        # junction sits exactly off-mask (dt = 0), thickness is 0 and
+        # the junction won't cluster with anything -- which is correct
+        # for free-floating phantom junctions.
+        thicknesses.append(2.0 * float(dt[yi, xi]))
+
+    # Union-find by intra-thickness Euclidean proximity.
+    n = len(pts)
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        xi, yi = pts[i]
+        for j in range(i + 1, n):
+            xj, yj = pts[j]
+            d2 = (xi - xj) * (xi - xj) + (yi - yj) * (yi - yj)
+            tol = 0.5 * max(thicknesses[i], thicknesses[j])
+            if tol > 0 and d2 <= tol * tol:
+                _union(i, j)
+
+    roots = set(_find(k) for k in range(n))
+    return float(len(roots))
 
 
 def pseudo_junction_count(segments: Sequence[Dict],
@@ -429,6 +501,7 @@ def compute_score(segments: Sequence[Dict],
                   wall_evidence: Optional[np.ndarray] = None,
                   door_mask: Optional[np.ndarray] = None,
                   window_mask: Optional[np.ndarray] = None,
+                  wall_mask: Optional[np.ndarray] = None,
                   primary_weights: Optional[Dict[str, float]] = None,
                   ) -> PipelineScore:
     """Compute the full pipeline score for ``segments``.
@@ -437,6 +510,12 @@ def compute_score(segments: Sequence[Dict],
     ``vectorize.compute_wall_evidence``) for sharper wall_evidence and
     phantom signals. If only the binary wall mask is available, pass it as
     ``wall_evidence`` — the integral degenerates to "fraction on mask".
+
+    ``wall_mask`` (separately from ``wall_evidence``) is the *binary* wall
+    mask used for thick-wall-aware ``junction_count`` clustering. Pass it
+    only when you want skeleton-ridge T-junctions on the same physical
+    thick wall to count as one physical junction instead of two; pass
+    ``None`` to use the legacy per-node count.
     """
     walls = [s for s in segments if s.get("type") == "wall"]
     openings = [s for s in segments if s.get("type") in ("door", "window")]
@@ -453,7 +532,7 @@ def compute_score(segments: Sequence[Dict],
     # bonus coefficients positive and penalty coefficients negative).
     terms["phantom"] = phantom_penalty(walls, wall_evidence)
     terms["duplicate"] = float(duplicate_penalty(segments))
-    terms["junction"] = float(junction_count(segments))
+    terms["junction"] = junction_count(segments, wall_mask=wall_mask)
     terms["pseudo_junction"] = float(pseudo_junction_count(segments))
     terms["opening_attachment"] = opening_attachment_ratio(walls, openings)
     terms["manhattan_consistency"] = manhattan_consistency(segments)

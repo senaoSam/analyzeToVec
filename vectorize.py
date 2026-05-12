@@ -1043,10 +1043,12 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
         # endpoint claims which trunk first.
 
         current = segs
+        wall_mask_local = masks.get("wall") if masks is not None else None
         base_score = S.compute_score(current,
                                      wall_evidence=wall_evidence,
                                      door_mask=door_mask,
-                                     window_mask=window_mask)
+                                     window_mask=window_mask,
+                                     wall_mask=wall_mask_local)
         used_mutations: Set[Tuple[int, str]] = set()
         any_accepted = False
         # Match legacy "trunk locked for rest of pass" semantics: once a
@@ -1069,7 +1071,8 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
             trial_score = S.compute_score(trial,
                                           wall_evidence=wall_evidence,
                                           door_mask=door_mask,
-                                          window_mask=window_mask)
+                                          window_mask=window_mask,
+                                          wall_mask=wall_mask_local)
             delta = trial_score.total - base_score.total
             if delta > CANDIDATE_MIN_ACCEPT_DELTA:
                 current = trial
@@ -1161,7 +1164,8 @@ def _accept_bridge_candidates(lines: List[Dict],
     base_score = S.compute_score(current,
                                  wall_evidence=wall_evidence,
                                  door_mask=door_mask,
-                                 window_mask=window_mask)
+                                 window_mask=window_mask,
+                                 wall_mask=wall_mask)
     used_endpoints: set = set()
 
     for cand in cands:
@@ -1174,7 +1178,8 @@ def _accept_bridge_candidates(lines: List[Dict],
         trial_score = S.compute_score(trial,
                                       wall_evidence=wall_evidence,
                                       door_mask=door_mask,
-                                      window_mask=window_mask)
+                                      window_mask=window_mask,
+                                      wall_mask=wall_mask)
         delta = trial_score.total - base_score.total
         if delta > CANDIDATE_MIN_ACCEPT_DELTA:
             current = trial
@@ -1192,6 +1197,7 @@ def _run_merge_loop(lines: List[Dict],
                     wall_evidence: np.ndarray = None,
                     door_mask: np.ndarray = None,
                     window_mask: np.ndarray = None,
+                    wall_mask: np.ndarray = None,
                     ) -> List[Dict]:
     """Shared fixed-point loop for any merge-style candidate stream.
 
@@ -1199,6 +1205,15 @@ def _run_merge_loop(lines: List[Dict],
     use this. Single-accept-then-regenerate (per todo.md L54), ``delta >=
     0`` accept rule (merges are pure simplifications — see
     ``_accept_merge_candidates``'s docstring for the rationale).
+
+    ``wall_mask`` enables the thick-wall-aware ``junction_count`` clustering
+    in ``compute_score``: when passed, T-junction nodes within local wall
+    half-thickness are counted as one physical junction. Without it, every
+    degree-3+ node counts separately (legacy behaviour). Pass the wall
+    mask when the upstream pipeline state can have skeleton-ridge ridges
+    that this loop is allowed to collapse (parallel_merge case) so the
+    score doesn't penalise the merge for "losing" a duplicate skeleton
+    artefact junction.
     """
     import candidates as C
     import scoring as S
@@ -1210,7 +1225,8 @@ def _run_merge_loop(lines: List[Dict],
     base_score = S.compute_score(current,
                                  wall_evidence=wall_evidence,
                                  door_mask=door_mask,
-                                 window_mask=window_mask)
+                                 window_mask=window_mask,
+                                 wall_mask=wall_mask)
 
     max_iter = 4 * len(lines) + 8
     for _iter in range(max_iter):
@@ -1226,7 +1242,8 @@ def _run_merge_loop(lines: List[Dict],
             trial_score = S.compute_score(trial,
                                           wall_evidence=wall_evidence,
                                           door_mask=door_mask,
-                                          window_mask=window_mask)
+                                          window_mask=window_mask,
+                                          wall_mask=wall_mask)
             delta = trial_score.total - base_score.total
             if skip_score or delta >= CANDIDATE_MIN_ACCEPT_DELTA:
                 current = trial
@@ -1246,6 +1263,7 @@ def _accept_merge_candidates(lines: List[Dict],
                              wall_evidence: np.ndarray = None,
                              door_mask: np.ndarray = None,
                              window_mask: np.ndarray = None,
+                             wall_mask: np.ndarray = None,
                              ) -> List[Dict]:
     """Run ``generators.collinear_merge_candidates`` to a fixed point.
 
@@ -1286,6 +1304,7 @@ def _accept_merge_candidates(lines: List[Dict],
         wall_evidence=wall_evidence,
         door_mask=door_mask,
         window_mask=window_mask,
+        wall_mask=wall_mask,
     )
 
 
@@ -1298,6 +1317,7 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
                                        wall_evidence: np.ndarray = None,
                                        door_mask: np.ndarray = None,
                                        window_mask: np.ndarray = None,
+                                       wall_mask: np.ndarray = None,
                                        ) -> List[Dict]:
     """Step 6 phase 3: run ``generators.parallel_merge_candidates`` to a
     fixed point. Replaces ``cluster_parallel_duplicates``.
@@ -1323,6 +1343,7 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
         wall_evidence=wall_evidence,
         door_mask=door_mask,
         window_mask=window_mask,
+        wall_mask=wall_mask,
     )
 
 
@@ -1712,6 +1733,7 @@ def _accept_fuse_candidates(lines: List[Dict],
                              wall_evidence: np.ndarray = None,
                              door_mask: np.ndarray = None,
                              window_mask: np.ndarray = None,
+                             wall_mask: np.ndarray = None,
                              ) -> List[Dict]:
     """Step 7 phase 1: candidate-based ``fuse_close_endpoints``.
 
@@ -1757,10 +1779,19 @@ def _accept_fuse_candidates(lines: List[Dict],
         sort_key=lambda c: (0 if c.meta["axis_dim"] == "x" else 1,
                             -c.meta["cluster_size"],
                             -c.meta["moved_count"]),
+        # ``skip_score=True`` (kept after step 11 evaluation) -- even with
+        # thick-wall-aware junction_count, the score's other integer-count
+        # terms (free_endpoint / pseudo_junction) move erratically on
+        # sub-2-px endpoint mutations and reject benign fuse clusters
+        # (source IOU 0.97 drop on regression). The geometric gate
+        # (1D wall-priority cluster within tol) is identical to legacy
+        # and is the entire safety net here; ``wall_mask`` still flows
+        # in for any future score audit / training-data extraction.
         skip_score=True,
         wall_evidence=wall_evidence,
         door_mask=door_mask,
         window_mask=window_mask,
+        wall_mask=wall_mask,
     )
 
 
@@ -2101,7 +2132,8 @@ def insert_missing_connectors(lines: List[Dict],
     base_score = S.compute_score(current,
                                  wall_evidence=wall_evidence,
                                  door_mask=door_mask,
-                                 window_mask=window_mask)
+                                 window_mask=window_mask,
+                                 wall_mask=wall_mask)
     used_mutations: Set[Tuple[int, str]] = set()
     used_endpoints: Set[Tuple[float, float]] = set()
 
@@ -2118,7 +2150,8 @@ def insert_missing_connectors(lines: List[Dict],
         trial_score = S.compute_score(trial,
                                       wall_evidence=wall_evidence,
                                       door_mask=door_mask,
-                                      window_mask=window_mask)
+                                      window_mask=window_mask,
+                                      wall_mask=wall_mask)
         delta = trial_score.total - base_score.total
         if delta > CANDIDATE_MIN_ACCEPT_DELTA:
             current = trial
@@ -2583,18 +2616,21 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # = 0.5). Pair-based with fixed-point loop handles the legacy's
     # graph-component transitivity.
     #
-    # ``skip_score=True`` — the score function's ``junction`` term
-    # counts every degree-3+ node equally, which mis-judges thick-wall
-    # ridge consolidation: when a skeletonised thick wall produces two
-    # parallel ridges that each terminate at a T-junction, merging the
-    # ridges into one centerline necessarily reduces the apparent
-    # junction count even though the *real* (architectural) T-junction
-    # is preserved. The generator's geometric gates (perp_tol +
-    # min_overlap_ratio) are already strict enough to catch only valid
-    # merges, so we trust them here. (Phase 1's collinear merge runs
-    # the score because its candidates can include "merging that creates
-    # a wall-body crossing", which the score's ``invalid_crossing`` term
-    # catches well.)
+    # ``skip_score=True`` (kept after step 11 evaluation) — the
+    # ``junction`` score term was originally the documented blocker;
+    # step 11 fixed ``junction_count`` to take a ``wall_mask`` and
+    # cluster T-nodes within local half-thickness so the two ridges'
+    # apparent T-junctions count as one physical junction (merge
+    # becomes score-neutral on that term). However step 11's
+    # regression test showed that *other* score terms (likely
+    # ``duplicate``/``free_endpoint`` interactions with how the
+    # parallel-merge candidates are sequenced) still push delta < 0
+    # for some merges legacy accepted. The geometric gates
+    # (perp_tol + min_overlap_ratio + same-type + same-axis) are
+    # already strict; skip_score=True keeps that trust. We still
+    # pass ``wall_mask`` so the (otherwise-unused) score computation
+    # inside the loop is thick-wall-aware -- helpful for audit logs
+    # and future ranking-model training data.
     s7 = _accept_parallel_merge_candidates(
         s6,
         perp_tol=parallel_merge,
@@ -2602,6 +2638,7 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         wall_evidence=None,
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
+        wall_mask=masks.get("wall"),
     )
     # Step 7 phase 3: candidate-based wrapper. ``grid_snap_endpoints`` is
     # semantically identical to ``manhattan_t_project`` -- same wall-
@@ -2732,6 +2769,7 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         wall_evidence=None,  # binary wall mask used as evidence by score
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
+        wall_mask=masks.get("wall"),  # step 11: thick-wall-aware junction
     )
 
     # Strip pipeline-internal fields (e.g. ``local_thickness`` from
