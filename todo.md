@@ -27,6 +27,8 @@
 | **11** | **Score 支柱（thick-wall junction）** | ✅ **完成**（commit 6d2e5c9，2026-05-12）| 修 step 6 phase 3 紀錄的 bug：`junction_count` 過度計數厚牆 ridge artefact。新版 `junction_count(segments, *, wall_mask=None)`：傳入 wall_mask 時、用 distance transform 取每個 junction node 的 local half-thickness、union-find 把 thickness 內的 T-node 聚成同一個 physical junction。`compute_score` 加 wall_mask 參數；vectorize.py 把 wall_mask 串到所有 score-using wrapper（`_run_merge_loop` / `_accept_merge_candidates` / `_accept_parallel_merge_candidates` / `_accept_fuse_candidates` / `_accept_bridge_candidates` / `t_snap_with_extension` / `insert_missing_connectors`）。試移除 `skip_score=True`：(a) `_accept_parallel_merge_candidates`：FAIL（wall IOU drop 27%、segs +15）——diagnostic 跑後發現是 `invalid_crossing` term 抓到「parallel merge 創造跨越」——legacy `cluster_parallel_duplicates` 也會創造這種跨越、靠下游 snap 清掉、所以 baseline 是「容忍跨越」狀態；score 嚴格、跟 baseline 衝突。(b) `_accept_fuse_candidates`：FAIL（wall IOU drop 3%）——sub-2-px endpoint 移動讓 integer-count term 抖。**結論**：score 在「真的有用」的地方更準了，但 parallel_merge 跟 fuse 還是維持 `skip_score=True`——score 改進是漸進的、不是一次到位、且追下去會跟 baseline 漂移。Regression：source/sg2 PASS bit-identical。|
 | **12** | **Audit 支柱** | ✅ **完成**（commit 99fc895，2026-05-12）| 補上原 todo 架構第 4 個支柱：candidate accept/reject 全域 capture，給 step 5 ranking model 訓練資料用。新模組 [audit.py](audit.py)：`AuditEvent` dataclass + `AuditRecorder.dump_json()`。vectorize.py 把 `audit_recorder` 串遍所有 score-using wrapper：`_run_merge_loop`、`_accept_bridge_candidates`、`t_snap_with_extension`、`brute_force_ray_extend`、`insert_missing_connectors`。`vectorize_bgr(audit_path=...)` 入口：預設 None（零 overhead）；傳 path 時 dump JSON。每筆事件含 op / accepted / delta / **delta_terms**（per-term breakdown，attribution 用）/ meta（geometric features，ranking model input 用）/ reason。Manual smoke test on source.png：284 個 event，merge 30/42、t_snap 12/70、bridge 20/32、fuse 68/0、gap_close 5/3、l_extend 0/2（accepted/rejected）。每個 rejected 都帶 delta_terms 解釋為什麼 score gate 拒絕——正是 step 5 ranking model 需要的格式。Regression：source/sg2 PASS bit-identical。|
 | **13** | **Evidence 支柱** | ✅ **完成**（commit 49b59e1，2026-05-12）| 補完原 step 3 「半完成」狀態：`compute_wall_evidence` 早就在算 continuous 0.0-1.0 multi-detector map（D1+D2+D3，weights 1.0/0.7/0.4），但 `evidence_to_binary` 0.5 threshold 把 gradient 切掉、score 只看 binary。Step 13 在 `vectorize_bgr` 把 raw continuous map 串到 3 個 score-using wrapper：`_accept_parallel_merge_candidates` / `_accept_bridge_candidates` / `_accept_fuse_candidates`。最終 `_accept_merge_candidates` 故意保留 binary——它用 `delta >= 0` 規則，continuous evidence 在 touching-collinear merges 上引入 sub-ULP 數值漂移（驗證：全 continuous 時 source 102→113、sg2 124→127、all IOUs 1.0000 渲染 bit-identical 但 hash 漂）。其他 wrapper 用 `delta > 0` 規則沒 zero-delta 模糊性、continuous 安全。**效果**：audit log 的 `wall_evidence` delta 從 binary 0/1 變連續 float（source.png 38/249 候選有非零 wall_evidence delta、範圍 [-0.034, +0.007]）——正是 step 5 ranking model 區分「bridge over real wall」vs「bridge over D3-edge-only ink」需要的信號。Regression：source/sg2 PASS bit-identical。|
+| **14** | **Audit viewer + stats（step 5 替代路徑）** | ✅ **完成**（commit da0675a，2026-05-12）| User 提問：「這麼單純的線條+顏色辨識有需要 ML 嗎？」→ 一起得到結論「不需要 ML、改做 audit 視覺化工具」。`audit.py` 加 `candidate_position(cand)` helper + `AuditEvent.position` 欄位；vectorize.py 9 個 `audit_recorder.record()` call sites 都串 position。新工具 [audit_view.py](audit_view.py) 兩個 subcommand：(a) `overlay AUDIT_JSON IMG OUT.png` 把事件畫成色點（綠=accepted、紅=rejected by score、teal=used_endpoint 去重）、大小 ∝ \|delta\|；(b) `stats AUDIT_JSON` 列 per-op accept/reject 比 + 主導 delta_terms。Regression：source/sg2 PASS bit-identical。|
+| **15** | **架構性結論：skip_score=True 不該移除** | ✅ **完成**（diagnostic，2026-05-12）| 透過 audit viewer 用「臨時 monkey-patch `_accept_parallel_merge_candidates` 把 skip_score=False」跑 source/sg2、capture audit JSON、分析 rejected merges 的 delta_terms 來看 score 為什麼會擋 parallel_merge。**結果**：source 99/115、sg2 138/150 個 merge candidates 在 score gate 下被拒；主導罰因不是 step 11 預期的 `invalid_crossing`，而是 **`junction` term**（source mean −1.15、73/99 全負；sg2 mean −1.28、111/138 全負）。Step 11 加了 thick-wall awareness（同物理 T 算一個）但這些 rejected merges 是 **「真的會掉一個 T-junction」**——只是下游 t_project / fuse 會把它接回來。**架構性結論**：score 是 local-decision（看當下 candidate 好不好）、pipeline 設計是 global-recovery（破壞 + 下游修復）；兩者無法和解。`skip_score=True` 不是 bug、是這個架構斷層的補丁、應該**永久保留**。要徹底退掉需要 look-ahead score（模擬整個下游、計算最終 score 而非即時 score）——太重，不值得。Audit pipeline 把這個結論從「感覺」變成「量化證據」、值得保留。|
 | 5 | scoring + ranking model | ❌ 未開始 | 需要 30-50 張人工標註的 floorplan 才能訓練；跨 session 工作。step 6 + 7 全部 candidate 化完成、generator 種類齊全；訓練料蒐集是下一個瓶頸 |
 
 **Pipeline call site 變化**：31（起始估算）→ **17**（−45%）。4.9.5 驗證後確認 `snap_endpoints` / `snap_colinear_coords` 兩個都仍是 load-bearing、不能刪。4.9.7（post-ablation cleanup）砍 `manhattan_intersection_snap`（fresh ablation 確認 source/sg2 dN=0 IOU=1.000 pure NO-OP，4.9.2 canonical_line + 4.9.4 thickness-aware manhattan_t_project 把它的工作搶光了）。**Step 6 phase 1**（2026-05-12）：把 final `manhattan_ultimate_merge` 換成 candidate-based `_accept_merge_candidates` + `collinear_merge_candidates` generator（exact-line touching/overlapping、junction-aware、`delta >= 0` accept rule）；附帶修復 legacy 一個 bug——legacy 對 baseline JSON 內部 exact duplicate 不做去重（own_contribution counting quirk），且不檢查 wall-body / opening-body crossing（sg2 上一條 door 被誤合成跨越 wall body interior 的單段，新 generator 透過 score 的 `invalid_crossing` term 拒絕）；source 113→102（11 個 dup 條目去除）、sg2 128→126（3 dup + 1 door 保持 split），baseline 已 user-approved 更新到 PASS bit-identical。call site 數仍 17（換實作、未削減；phase 4 才合併 call site）。**Step 7 phase 1-6**（2026-05-12）：5 個 legacy snap pass 全部 candidate 化。`fuse_close_endpoints` / `manhattan_t_project` / `grid_snap_endpoints` / `snap_colinear_coords` / `snap_endpoints` → `_accept_fuse_candidates` / `_accept_t_project_candidates` / `_accept_2d_cluster_candidates`（3 個 generator 撐 5 個 call site）。重點：**沒接受 todo 原本「pre-canonical 暫緩」的妥協**，phase 4 / phase 5 直接挑戰 `snap_colinear_coords` 跟 `snap_endpoints`——phase 4 用 fuse generator + `masks=None` 通過 bit-identical；phase 5 一開始試 1D fuse generator 失敗（pre-canonical wall IOU drop ~18%）、馬上 revert 寫專屬 2D union-find cluster generator + 4-decimal rounding 通過 bit-identical。phase 6 砍 −283 行 legacy code。call site 仍 17（unification、不是 reduction），但 5 個 snap call sites 通過共用 generator 達成「全域統一」目標。
@@ -51,20 +53,27 @@
 - [candidates.py](candidates.py) — `Candidate` / `SpatialGate` / 三個 gates
 - [generators.py](generators.py) — **12 個 candidate generator**：`proximal_bridge_candidates`（axis-bridge + L-bridge）、`collinear_merge_candidates`（step 6 phase 1）、`parallel_merge_candidates`（step 6 phase 3）、`endpoint_fuse_candidates`（step 7 phase 1）、`t_project_candidates`（step 7 phase 2）、`endpoint_cluster_2d_candidates`（step 7 phase 5）、`cluster_collinear_merge_candidates`（step 8 phase 1）、`axis_align_candidates`（step 9 phase 1）、`truncate_overshoot_candidates`（step 9 phase 2）、`canonicalize_offset_candidates`（step 9 phase 3）、`manhattan_force_axis_candidates`（step 10 phase 1）、`t_junction_snap_candidates`（step 10 phase 2）
 - [canonical_line.py](canonical_line.py) — `compute_local_thickness`（thickness-aware tol 用，step 4.9.2；canonicalize_offsets 在 step 9 phase 3 移到 generators.py + vectorize.py 並刪除舊版）
-- [audit.py](audit.py) — `AuditEvent` / `AuditRecorder`（step 12）。`vectorize_bgr(audit_path=...)` 時 dump 全 candidate accept/reject + delta_terms breakdown 為 JSON、step 5 ranking model 的訓練資料 pipeline
+- [audit.py](audit.py) — `AuditEvent` / `AuditRecorder` / `candidate_position`（step 12 + 14）。`vectorize_bgr(audit_path=...)` 時 dump 全 candidate accept/reject + delta_terms breakdown + 事件 (x, y) 位置為 JSON。**用途**：debug / 診斷工具（不是 ML pipeline）
+- [audit_view.py](audit_view.py) — audit JSON 視覺化 CLI（step 14）。`overlay` subcommand 把事件畫成色點 PNG（綠 accepted / 紅 rejected / teal dedup）、`stats` subcommand 列 per-op accept/reject + 主導 delta_terms。**用途**：找系統性 score term bias、驗證 skip_score=True 該不該留
 
 ---
 
 ## 給下個 session 的交接（**先讀這節**）
 
-**當前 HEAD = `49b59e1`**（feat: step 13 -- Evidence pillar）。Source / sg2 都 PASS bit-identical。Pipeline call site 17。**所有 13 個通用幾何優化 pass 全部 candidate-based**；**四個支柱全部就位**（Evidence / Candidate / Audit 完成，Score 部分改善）。
+**當前 HEAD = `da0675a`**（feat: step 14 -- audit overlay viewer + delta_terms stats）。Source / sg2 都 PASS bit-identical。Pipeline call site 17。**所有 13 個通用幾何優化 pass 全部 candidate-based + 四個支柱全部就位**。**Step 15 diagnostic 確認 `skip_score=True` 是架構性必需、不再嘗試移除**。
 
-**Step 11-13 session 做的 commit**：
-- `49b59e1` step 13：Evidence 支柱完成。`compute_wall_evidence` continuous 0.0-1.0 map 串到 3 個 score-using wrapper；audit log 的 wall_evidence delta 變連續 float（從 binary 0/1）
-- `80d8e8a` step 12 wrap-up docs
-- `99fc895` step 12：[audit.py](audit.py) AuditRecorder + 串到所有 score-using wrapper、`vectorize_bgr(audit_path=...)` 入口 + JSON dump
-- `4b0978d` step 11 wrap-up docs
-- `6d2e5c9` step 11：`junction_count(wall_mask=...)` thick-wall clustering + wall_mask 串遍 score-using wrapper
+**最近一個 session 的關鍵 commit**：
+- `da0675a` step 14：audit overlay viewer + stats tool（[audit_view.py](audit_view.py)）；audit event 加 `position` 欄位
+- `49b59e1` step 13：Evidence 支柱完成。`compute_wall_evidence` continuous 0.0-1.0 map 串到 3 個 score-using wrapper
+- `99fc895` step 12：[audit.py](audit.py) AuditRecorder + 串到所有 score-using wrapper
+- `6d2e5c9` step 11：`junction_count(wall_mask=...)` thick-wall clustering
+
+**Step 15 diagnostic 結論**（沒寫成新 commit、是 step 14 後跑 monkey-patch 實驗的發現）：
+- Audit viewer 跑 source/sg2、用 monkey-patch 臨時把 parallel_merge 改成 skip_score=False、觀察 rejected merges 的 delta_terms
+- 主導罰因是 `junction` term（mean −1.15/−1.28、73-111 個全負）
+- 解釋：parallel_merge **真的**會破壞 T-junction、score gate **正確**識別；但下游 t_project / fuse 會把破壞的 T 修回來、所以 baseline 是「破壞 + 修復」的最終狀態
+- Score 是 local-decision、pipeline 是 global-recovery、兩者無法和解
+- **`skip_score=True` 應該永久保留**——它不是 bug、是架構斷層的補丁
 
 **最近 step 10 session 做的 3 個 commit**：
 - `6957cb0` step 10 phase 3：刪 `t_junction_snap` / `manhattan_force_axis` / `_point_on_axis_seg`（−66 行）+ ablation sync
@@ -104,17 +113,17 @@
 
 | 支柱 | 狀態 | 備註 |
 |---|---|---|
-| 1. Evidence | ✅ **完成**（step 13） | `compute_wall_evidence` 連續 0.0-1.0 map（D1+D2+D3）串到 3 個 score-using wrapper（parallel_merge / bridge / fuse）；最終 merge 保留 binary（`delta >= 0` 規則對 sub-ULP 漂移敏感）。Audit log 的 wall_evidence delta 從 binary 變連續 |
+| 1. Evidence | ✅ **完成**（step 13） | `compute_wall_evidence` 連續 0.0-1.0 map（D1+D2+D3）串到 3 個 score-using wrapper；最終 merge 保留 binary |
 | 2. Candidate | ✅ **完成**（step 10） | 13 個通用 pass + 4 個 step-4 era pass，全部 candidate-based |
-| 3. Score | ⚠️ 部分改善（step 11） | `junction` thick-wall awareness 已修；compute_score 接 wall_mask、所有 score-using wrapper 都串通了。Diagnostic 後發現 `parallel_merge` 的 skip_score=True 根因是 `invalid_crossing` term 嚴格、跟「legacy baseline 容忍 phantom merge」衝突；徹底退 skip_score 需要 baseline 漂移。維持現狀 |
-| 4. Audit | ✅ **完成**（step 12） | [audit.py](audit.py) capture candidate accept/reject 全部 event 含 delta_terms breakdown，串到所有 score-using wrapper；`vectorize_bgr(audit_path=...)` 入口（default off）dump JSON。Step 5 ranking model 的訓練資料 pipeline 已就位 |
+| 3. Score | ⚠️ **改到天花板**（step 11 + step 15 diagnostic） | `junction` thick-wall awareness 已修、wall_mask 串通所有 wrapper。**step 15 diagnostic 確定**：parallel_merge / fuse 的 `skip_score=True` 是**架構性必需**——score 是 local-decision、pipeline 是 global-recovery、無法和解。`skip_score=True` 該留、是補丁、不是 bug。要徹底退需 look-ahead score（過重） |
+| 4. Audit | ✅ **完成**（step 12 + step 14） | [audit.py](audit.py) + [audit_view.py](audit_view.py)：capture 每個 candidate decision 含 delta_terms + position；CLI 工具 overlay 視覺化 + stats 主導 term 分析。**用途定位**：debug / 診斷工具（不是 ML 訓練資料、不是自動最佳化）——把 pipeline 黑盒變透明、需要證據時可以引用 |
 
 **下次接著做什麼（按優先順序）**：
 
-1. **step 5 — ranking model + 標註集**（四支柱齊備、終於可開工）—— Evidence / Candidate / Score / Audit 都就位了。瓶頸：30-50 張人工標註資料蒐集；audit JSON 是訓練 input、人工標籤是 target。先用 source/sg2/Gemini 三張當 bootstrap、active learning 擴張
-2. **Score 支柱再修**（深一層）— step 11 diagnostic 確認 parallel_merge 的 skip_score 跟「legacy baseline 容忍 phantom merge」衝突；要嘛 (a) 修 score 識別「legacy 容忍但實際是 phantom」、要嘛 (b) 接受 baseline 漂移、重新批准 baseline。**現在 audit 在跑、有資料、可量化評估了**——下次做 step 5 過程中會自然產生判準
-3. **Gemini un-skip + baseline 更新** — step 4.7-4.8 後 Gemini 輸出跟舊 baseline 大幅漂移，需要視覺確認。Continuous evidence 也可能影響 Gemini（D3 在文字標註上會 fire），值得趁這次再驗一次
-4. **`brute_force_ray` / `insert_connectors` / `t_snap_with_extension` polish** — step 4 era 寫的 candidate-based，但實作風格較舊（沒走 `_run_merge_loop`）；可選的 polish 機會抽到統一 wrapper 模式
+1. **Gemini un-skip + baseline 更新** — step 4.7-4.8 後 Gemini 輸出跟舊 baseline 大幅漂移、step 13 continuous evidence 又可能影響 Gemini（D3 在文字標註上會 fire）。視覺確認後 user-approved baseline update。**最務實的下一步**
+2. **`brute_force_ray` / `insert_connectors` / `t_snap_with_extension` polish** — step 4 era 寫的 candidate-based、但實作風格較舊（沒走 `_run_merge_loop`）；想要全域統一收尾的可選 polish
+3. **step 5 ranking model**——**重新評估後不建議做**。原因：(a) 你的問題（線條+顏色辨識）太單純、不需要 ML（user 也認同）；(b) 30-50 張人工標註成本太高、收益太低；(c) step 15 diagnostic 證明 score 跟 pipeline 的衝突是架構性的、ML 也救不了。除非未來要處理更複雜的 floorplan 變體，否則 skip
+4. **step 15 diagnostic 留檔後不用再追** — `skip_score=True` 在 parallel_merge / fuse 上是**永久補丁**、不要再花時間想退掉
 
 **下次開工前的 checklist**：
 1. `git log --oneline -10` 看最近狀態
@@ -169,6 +178,7 @@
 - **step 9 phase 2 教訓（in-place mutation cascade 的順序依賴）**：`truncate_overshoots` legacy 是「外層 (i, end)、內層 j」雙迴圈、mutate `segs[i]` in place、subsequent (i', end') 的內層 j 掃 trunks 時讀到的 segs[j] 是 LIVE 狀態（含前面 iteration 的 mutation）。第一試「pre-compute single-pass closest-wins」漂；第二試「index-order first-match」仍漂。唯一 bit-identical 的辦法是讓 generator 內部做一個 local `segs_sim` 副本、完整模擬 legacy 的雙迴圈 in-place mutation cascade、最後捕捉每個 endpoint 的「最終座標」做為單一 candidate。Batch apply 那些 candidates 到原始輸入就等於 legacy 結果。下次遇到 order-dependent in-place legacy 直接走這條路、不要試 single-pass approximation
 - **step 9 phase 3 教訓（attach_thickness 側通道）**：candidate 的 mutate 只能改既有 endpoint 座標、不能 add 新欄位。Legacy `canonicalize_offsets(attach_thickness=True)` 對 EVERY output segment（包括沒 cluster 到的）都加 `local_thickness` 欄位。Wrapper 要在 apply_candidate 之後做後處理 attach。這類「全域 metadata 注入」side-channel 不適合 candidate 表達、wrapper 自己處理是對的
 - **step 11 教訓（修一個 score term 不夠移除 skip_score）**：step 6 phase 3 紀錄「`junction` term 誤判厚牆 ridge」是 skip_score=True 的「documented blocker」。step 11 修了 junction → thick-wall-aware clustering。試移除 `_accept_parallel_merge_candidates` 跟 `_accept_fuse_candidates` 的 skip_score 都 FAIL——還有其他 term 跟 score gate 衝突（duplicate / free_endpoint / pseudo_junction 在 cluster merge 跟 sub-2-px fuse 上會漂）。**結論**：score 是 N-term 加權和，修一個 term 只解一部分；要徹底用 score gate、得每個 term 都跟 legacy semantic 對齊。漸進式改進、不要期待一次到位。
+- **step 15 教訓（local-decision vs global-recovery 是架構斷層、不要硬修）**：透過 audit 量化分析發現 parallel_merge 跟 fuse 的 skip_score=True 根因不是 score 的某個 term 還沒修——而是**pipeline 設計是「破壞 + 下游修復」、score 是「即時決策」**、兩者天生無法和解。Score gate 正確識別 parallel_merge 在當下破壞 T-junction（73-111 個 candidate 主導 term 是 `junction` 全負）、但下游 t_project / fuse 會修回來、最終 baseline 是修復後的狀態。要徹底用 score gate 需要 look-ahead score（模擬整個下游）—太重不值得。**`skip_score=True` 是合理的架構補丁、應該永久保留**、不要再花時間想退掉。Audit 的價值是把這個結論從「感覺」變成「量化證據」。
 
 ---
 
