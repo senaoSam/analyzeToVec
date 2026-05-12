@@ -41,6 +41,12 @@ import candidates as C
 from canonical_line import compute_local_thickness
 
 
+# Wall-priority table — keep in sync with vectorize.TYPE_PRIORITY. Walls
+# anchor every snap; chromatic endpoints snap onto walls, never the other
+# direction. Duplicated here to keep this module free of upward imports.
+_TYPE_PRIORITY: Dict[str, int] = {"wall": 0, "window": 1, "door": 1}
+
+
 def _axis_of(seg: Dict) -> str:
     """Return "h", "v" or "d" for the segment's axis (strict equality)."""
     dx = abs(float(seg["x2"]) - float(seg["x1"]))
@@ -639,5 +645,116 @@ def parallel_merge_candidates(segments: List[Dict],
                 if j <= i:
                     continue
                 _emit_pair(i, j, "v")
+
+    return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 7 phase 1: endpoint_fuse_candidates  (replaces fuse_close_endpoints)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``fuse_close_endpoints`` is a 1D-cluster-per-axis pass: collect every
+# endpoint's x (and every y), sort, walk to build clusters where consecutive
+# values are within the pairwise min thickness-aware tol, then rewrite each
+# endpoint's coord to the cluster's wall-priority mean. x and y clusters are
+# independent (mutating x doesn't touch y).
+#
+# This generator emits one ``Candidate`` per 1D cluster that has at least one
+# member needing to move. Each candidate is a mutate-only batch (``add=[]``,
+# ``remove=[]``); the mutates relocate every cluster member to the canonical
+# coord along that axis dimension. The accept loop is fixed-point with
+# ``skip_score=True`` — the geometric gate (within thickness-aware tol +
+# wall-priority anchor) is the safety net, and the score signals for
+# sub-pixel coord canonicalisation are too weak to gate reliably (most
+# fuses move endpoints < 2 px, smaller than the integer-count granularity
+# of free_endpoint / junction / pseudo_junction).
+#
+# x and y axes are independent: a candidate carries the ``axis_dim`` it
+# operates on, so accept loop can interleave the two without breaking
+# bit-identical legacy semantics. Cluster definition matches legacy
+# ``_cluster`` in vectorize.fuse_close_endpoints exactly (sort + walk +
+# min-of-neighbour-tol join + wall-priority mean canonical).
+
+def endpoint_fuse_candidates(segments: List[Dict],
+                              seg_tols: Sequence[float],
+                              ) -> List[C.Candidate]:
+    """Emit one ``mutate``-only candidate per axis-direction 1D cluster.
+
+    Args:
+        segments: list of segment dicts.
+        seg_tols: per-segment thickness-aware tol (length == len(segments)).
+            For an endpoint owned by ``segments[i]``, this is the tol it
+            contributes when clustering. Two endpoints with tols ``ta``,
+            ``tb`` join into the same cluster when their sort-adjacent
+            coord delta is <= ``min(ta, tb)`` — the strict legacy rule.
+    """
+    if not segments:
+        return []
+    if len(seg_tols) != len(segments):
+        raise ValueError("seg_tols must have same length as segments")
+
+    cands: List[C.Candidate] = []
+
+    for axis_dim in ("x", "y"):
+        # items: (coord, seg_idx, end, type, tol)
+        items: List[Tuple[float, int, str, str, float]] = []
+        for i, s in enumerate(segments):
+            tol = float(seg_tols[i])
+            for end in ("1", "2"):
+                items.append((float(s[f"{axis_dim}{end}"]),
+                              i, end, s.get("type", ""), tol))
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda it: it[0])
+
+        clusters: List[List[Tuple[float, int, str, str, float]]] = [[items[0]]]
+        for it in items[1:]:
+            prev = clusters[-1][-1]
+            join_tol = min(it[4], prev[4])
+            if it[0] - prev[0] <= join_tol:
+                clusters[-1].append(it)
+            else:
+                clusters.append([it])
+
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            prios = [_TYPE_PRIORITY.get(c[3], 99) for c in cluster]
+            top = min(prios)
+            anchor_vals = [c[0] for c, p in zip(cluster, prios) if p == top]
+            canonical = float(np.mean(anchor_vals))
+
+            mutates: List[Tuple[int, str, float, float]] = []
+            touched_endpoints: List[Tuple[int, str]] = []
+            for (coord, seg_idx, end, _t, _tol) in cluster:
+                if abs(coord - canonical) <= 1e-12:
+                    continue
+                seg = segments[seg_idx]
+                if axis_dim == "x":
+                    new_x = canonical
+                    new_y = float(seg[f"y{end}"])
+                else:
+                    new_x = float(seg[f"x{end}"])
+                    new_y = canonical
+                mutates.append((seg_idx, end, new_x, new_y))
+                touched_endpoints.append((seg_idx, end))
+
+            if not mutates:
+                continue
+
+            cands.append(C.Candidate(
+                op="fuse",
+                add=[],
+                remove=[],
+                mutate=mutates,
+                meta={
+                    "axis_dim": axis_dim,
+                    "canonical": canonical,
+                    "cluster_size": len(cluster),
+                    "moved_count": len(mutates),
+                    "spread": cluster[-1][0] - cluster[0][0],
+                    "touched_endpoints": touched_endpoints,
+                },
+            ))
 
     return cands

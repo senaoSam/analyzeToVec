@@ -2005,6 +2005,65 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_fuse_candidates(lines: List[Dict],
+                             *,
+                             fallback_tol: float,
+                             masks: Optional[Dict[str, np.ndarray]] = None,
+                             wall_evidence: np.ndarray = None,
+                             door_mask: np.ndarray = None,
+                             window_mask: np.ndarray = None,
+                             ) -> List[Dict]:
+    """Step 7 phase 1: candidate-based ``fuse_close_endpoints``.
+
+    Runs ``generators.endpoint_fuse_candidates`` to a fixed point. Each
+    candidate is one 1D cluster's worth of mutates — the cluster
+    definition (sort-and-walk on each of x and y independently with the
+    pairwise min thickness-aware tol as join threshold, wall-priority
+    mean as canonical) matches legacy ``fuse_close_endpoints`` exactly.
+
+    ``skip_score=True``: legacy fuse applies every cluster unconditionally
+    — its safety net is the geometric gate (within tol, wall-priority
+    anchor). The score's snap-relevant signals (``free_endpoint``,
+    ``junction``, ``pseudo_junction``) are integer-count terms that
+    typically don't move on a sub-2-px endpoint mutation, so a strict
+    ``delta >= 0`` gate would either accept every candidate anyway or
+    reject benign ones on score noise. Trust the gates the way phase 3
+    parallel-merge does.
+
+    ``seg_tols`` is computed once up front against the *input* segments,
+    mirroring legacy (which also computes it once before mutating). The
+    accept loop's mutates only move endpoint coords — they don't change
+    segment identity — so the per-segment thickness sampled from the
+    distance transform stays valid across iterations.
+    """
+    import generators as G
+    if not lines:
+        return list(lines)
+
+    seg_tols_initial = _compute_seg_tols(lines, masks, fallback=fallback_tol) \
+        if masks is not None else [fallback_tol] * len(lines)
+
+    # Capture the initial tols so the regenerate lambda uses them across
+    # iterations. Each iteration's regenerate must pass a tols list whose
+    # indices align with the *current* segments list. Since fuse never
+    # adds or removes segments, current and initial indices line up
+    # by-position throughout the loop.
+    return _run_merge_loop(
+        lines,
+        regenerate=lambda segs: G.endpoint_fuse_candidates(
+            segs, seg_tols=seg_tols_initial),
+        # Apply x-axis clusters before y, then larger clusters first
+        # (more endpoints unified per accept → faster convergence).
+        sort_key=lambda c: (0 if c.meta["axis_dim"] == "x" else 1,
+                            -c.meta["cluster_size"],
+                            -c.meta["moved_count"]),
+        skip_score=True,
+        wall_evidence=wall_evidence,
+        door_mask=door_mask,
+        window_mask=window_mask,
+    )
+
+
 def brute_force_ray_extend(lines: List[Dict],
                            tol: float,
                            loose_tol: float,
@@ -2937,7 +2996,20 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # Step 4.9.4: per-endpoint tol is thickness-aware; ``ray_fuse`` is the
     # fallback only (and is below the 2 px floor anyway, so in practice
     # every endpoint resolves via clamp(0.25*thickness, 2, 6)).
-    fuse_close_endpoints(snapped, ray_fuse, masks=masks)
+    # Step 7 phase 1: candidate-based fixed-point fuse loop replaces the
+    # in-place ``fuse_close_endpoints``. Same 1D cluster semantic
+    # (independent x and y, wall-priority mean canonical, pairwise-min
+    # thickness-aware join), but each cluster is now a Candidate so the
+    # shared accept-loop / generator infrastructure picks it up. ``skip_
+    # score=True`` because legacy fuse has no score gate at all.
+    snapped = _accept_fuse_candidates(
+        snapped,
+        fallback_tol=ray_fuse,
+        masks=masks,
+        wall_evidence=None,
+        door_mask=masks.get("door"),
+        window_mask=masks.get("window"),
+    )
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Step 6 phase 1: one last collinear merge in case ray extension /
     # bridge generator produced overlapping spans that can now coalesce.
