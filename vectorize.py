@@ -28,6 +28,7 @@ import numpy as np
 from skimage.morphology import skeletonize
 
 from canonical_line import compute_local_thickness
+from audit import candidate_position as _audit_position
 
 # Segment fields that are pipeline-internal — computed and used inside
 # vectorize_bgr but stripped before the result leaves this module. Keeps
@@ -1083,6 +1084,7 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                     op=cand.op, accepted=accept, delta=delta,
                     delta_terms=delta_terms, meta=cand.meta,
                     reason="score_gate",
+                    position=_audit_position(cand),
                 )
             if accept:
                 current = trial
@@ -1188,6 +1190,7 @@ def _accept_bridge_candidates(lines: List[Dict],
                 audit_recorder.record(
                     op=cand.op, accepted=False, delta=0.0,
                     meta=cand.meta, reason="used_endpoint",
+                    position=_audit_position(cand),
                 )
             continue
         trial = C.apply_candidate(current, cand)
@@ -1205,6 +1208,7 @@ def _accept_bridge_candidates(lines: List[Dict],
                 op=cand.op, accepted=accept, delta=delta,
                 delta_terms=delta_terms, meta=cand.meta,
                 reason="score_gate",
+                position=_audit_position(cand),
             )
         if accept:
             current = trial
@@ -1282,6 +1286,7 @@ def _run_merge_loop(lines: List[Dict],
                     delta_terms=delta_terms,
                     meta=cand.meta,
                     reason="skip_score" if skip_score else "score_gate",
+                    position=_audit_position(cand),
                 )
             if accept:
                 current = trial
@@ -1987,6 +1992,7 @@ def brute_force_ray_extend(lines: List[Dict],
                     audit_recorder.record(
                         op=cand.op, accepted=False, delta=0.0,
                         meta=cand.meta, reason="used_endpoint",
+                        position=_audit_position(cand),
                     )
                 continue
             trial = C.apply_candidate(current, cand)
@@ -2003,6 +2009,7 @@ def brute_force_ray_extend(lines: List[Dict],
                     op=cand.op, accepted=accept, delta=delta,
                     delta_terms=delta_terms, meta=cand.meta,
                     reason="score_gate",
+                    position=_audit_position(cand),
                 )
             if accept:
                 current = trial
@@ -2206,6 +2213,7 @@ def insert_missing_connectors(lines: List[Dict],
                 audit_recorder.record(
                     op=cand.op, accepted=False, delta=0.0,
                     meta=cand.meta, reason="used_endpoint",
+                    position=_audit_position(cand),
                 )
             continue
         if any((idx, end) in used_mutations for (idx, end, _, _) in cand.mutate):
@@ -2213,6 +2221,7 @@ def insert_missing_connectors(lines: List[Dict],
                 audit_recorder.record(
                     op=cand.op, accepted=False, delta=0.0,
                     meta=cand.meta, reason="used_mutation",
+                    position=_audit_position(cand),
                 )
             continue
 
@@ -2231,6 +2240,7 @@ def insert_missing_connectors(lines: List[Dict],
                 op=cand.op, accepted=accept, delta=delta,
                 delta_terms=delta_terms, meta=cand.meta,
                 reason="score_gate",
+                position=_audit_position(cand),
             )
         if accept:
             current = trial

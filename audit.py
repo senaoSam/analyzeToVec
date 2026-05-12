@@ -41,13 +41,38 @@ class AuditEvent:
     delta_terms: Dict[str, float] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
     reason: str = ""
+    position: Optional[Any] = None  # (x, y) in image coords, or None
 
     def to_jsonable(self) -> Dict[str, Any]:
         out = asdict(self)
         # meta may contain tuples and numpy types; coerce to JSON-safe.
         out["meta"] = _coerce(self.meta)
         out["delta_terms"] = {k: float(v) for k, v in self.delta_terms.items()}
+        out["position"] = _coerce(self.position)
         return out
+
+
+def candidate_position(cand: Any) -> Optional[tuple]:
+    """Compute a representative (x, y) for a Candidate for audit overlays.
+
+    Strategy:
+      * ``add``-only / mixed: midpoint of the first added segment's endpoints
+      * ``mutate``-only: mean of every mutate's (new_x, new_y) target
+      * ``remove``-only (e.g. ``prune`` of zero-length): None (nothing
+        geometric to plot)
+    """
+    add = getattr(cand, "add", None)
+    mutate = getattr(cand, "mutate", None)
+    if add:
+        s = add[0]
+        return (0.5 * (float(s["x1"]) + float(s["x2"])),
+                0.5 * (float(s["y1"]) + float(s["y2"])))
+    if mutate:
+        xs = [float(m[2]) for m in mutate]
+        ys = [float(m[3]) for m in mutate]
+        if xs:
+            return (sum(xs) / len(xs), sum(ys) / len(ys))
+    return None
 
 
 def _coerce(obj: Any) -> Any:
@@ -85,7 +110,8 @@ class AuditRecorder:
                delta: float,
                delta_terms: Optional[Dict[str, float]] = None,
                meta: Optional[Dict[str, Any]] = None,
-               reason: str = "") -> None:
+               reason: str = "",
+               position: Optional[tuple] = None) -> None:
         self.events.append(AuditEvent(
             op=op,
             accepted=accepted,
@@ -93,6 +119,7 @@ class AuditRecorder:
             delta_terms=dict(delta_terms) if delta_terms else {},
             meta=dict(meta) if meta else {},
             reason=reason,
+            position=position,
         ))
 
     def dump_json(self, path: str) -> None:
