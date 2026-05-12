@@ -24,16 +24,59 @@
 
 **Pipeline call site 變化**：31（起始估算）→ **17**（−45%）。4.9.5 驗證後確認 `snap_endpoints` / `snap_colinear_coords` 兩個都仍是 load-bearing、不能刪。4.9.7（post-ablation cleanup）砍 `manhattan_intersection_snap`（fresh ablation 確認 source/sg2 dN=0 IOU=1.000 pure NO-OP，4.9.2 canonical_line + 4.9.4 thickness-aware manhattan_t_project 把它的工作搶光了）。**Step 6 phase 1**（2026-05-12）：把 final `manhattan_ultimate_merge` 換成 candidate-based `_accept_merge_candidates` + `collinear_merge_candidates` generator（exact-line touching/overlapping、junction-aware、`delta >= 0` accept rule）；附帶修復 legacy 一個 bug——legacy 對 baseline JSON 內部 exact duplicate 不做去重（own_contribution counting quirk），且不檢查 wall-body / opening-body crossing（sg2 上一條 door 被誤合成跨越 wall body interior 的單段，新 generator 透過 score 的 `invalid_crossing` term 拒絕）；source 113→102（11 個 dup 條目去除）、sg2 128→126（3 dup + 1 door 保持 split），baseline 已 user-approved 更新到 PASS bit-identical。call site 數仍 17（換實作、未削減；phase 4 才合併 call site）。
 
-**Regression 狀態（收工）**：
-- source: **PASS bit-identical**（step 4.9.4 baseline 已 user-approved 更新）。segs 117→113（baseline JSON 內部 duplicate 條目從 21 變 18：同條 wall 寫兩次的去重）、free 11→12（+1，duplicate 消掉後曝光的 loose end）
-- sg2: **PASS bit-identical**（step 4.9.4 baseline 已 user-approved 更新）。segs 128→128。實際內部差異：3 處 1.5 px canonical-x 收斂偏移（x=1148.6→1150.1 的 wall/door 三段一起收）+ 2 處 baseline 去重（step 4.9.6 的 contained wall (356.8, 1264.6→1325.0) + (1380.8, 857→913) x2 變 x1）+ 1 處 window/wall topology 修復（baseline 中 window y=1119→1325 跟 wall y=1300→1325 重疊，current 把 window 縮到 y=1299.7、不再重疊）+ 2 處多 1 個 contained-segment entry（視覺零影響）
+**Regression 狀態（收工，2026-05-12 step 6 phase 3 後）**：
+- source: **PASS bit-identical** at 102 segs / free 12（step 6 phase 1 砍 11 個 baseline JSON duplicate 條目；step 6 phase 3 source 上 PASS 不變動）
+- sg2: **PASS bit-identical** at 124 segs / free 25（step 6 phase 3 baseline 已 user-approved 更新；diff 是 2 處 ~1.5 px sub-pixel canonical 收斂 + 2 處 baseline duplicate dedup）
 - Gemini_Generated: **skip=true**（manifest 設定）。step 4.7-4.8 之後輸出跟 step 2 era baseline 大幅漂移（free 54→35 改善了、但 wall IOU 0.69 表示位置漂得多），未做視覺確認 + baseline update
+
+**Fresh ablation 結果（commit `97bba8b`，post-step-6-phase-3）**：
+- 沒有新的 pure NO-OP 出現（4.9.7 砍掉的 `manhattan_intersection_snap` 是最後一個）
+- `merge_final`（phase 1 candidate-based）特性：dN +11/+3/+6 across source/sg2/Gemini, **IOU=1.000 全部**——做純 JSON 簡化、零渲染影響，Gemini 還順便 dFree -4 改善 topology。是「事情有做但不影響渲染」型 pass
+- `cluster_parallel`（phase 3 candidate-based）max|dN|=32, IOU 0.70——load-bearing 量級跟 legacy 一致
+- 其他「邊際 pass」（merge_collin_2 IOU 0.96、manhattan_t_project IOU 0.98、grid_snap_2 IOU 0.98）都是 case-specific load-bearing：對某張圖是 NO-OP、對其他張在做事，不能直接刪
 
 **新模組**（todo 沒列、實際產生）：
 - [scoring.py](scoring.py) — score 函數
 - [candidates.py](candidates.py) — `Candidate` / `SpatialGate` / 三個 gates
-- [generators.py](generators.py) — `proximal_bridge_candidates`（axis-bridge + L-bridge + safe-mutate）
+- [generators.py](generators.py) — `proximal_bridge_candidates`（axis-bridge + L-bridge）、`collinear_merge_candidates`（step 6 phase 1）、`parallel_merge_candidates`（step 6 phase 3）
 - [canonical_line.py](canonical_line.py) — `canonicalize_offsets` + `compute_local_thickness`（step 4.9.2）
+
+---
+
+## 給下個 session 的交接（**先讀這節**）
+
+**當前 HEAD = `97bba8b`**（chore: ablation report after step 6）。Source / sg2 都 PASS bit-identical。Pipeline call site 17。
+
+**最近 5 個 commit 是這個 session 做的**：
+- `97bba8b` fresh ablation 跑完、sync ablation.py 到 phase 1 + 3 後狀態
+- `5c4932e` step 6 wrap-up 文件 + 教訓寫入「容易踩的雷」段
+- `94e3760` step 6 phase 3：cluster_parallel_duplicates → candidate-based + sg2 baseline update
+- `3f511db` step 6 phase 2 deferred 紀錄（不要再嘗試 early-pipeline merge migration、score 信號太弱）
+- `005f780` step 6 phase 1：final manhattan_ultimate_merge → candidate-based + 兩個 legacy bug 修復
+
+**架構基礎建設已備好可重用**（在 `vectorize.py` ~1870-1980）：
+- `_run_merge_loop(lines, regenerate, sort_key, skip_score, …)` — 通用 fixed-point accept loop
+- `_accept_merge_candidates(perp_tol, gap_tol, junction_aware, …)` — collinear/touching 模式
+- `_accept_parallel_merge_candidates(perp_tol, touch_perp_tol, min_overlap_ratio, …)` — parallel duplicates 模式
+- `candidates.Candidate(op="merge"|"gap_close"|…, add, remove, mutate, meta)` — 共用 dataclass
+
+**下次接著做什麼（按優先順序）**：
+
+1. **step 7 phase 1 — post-canonical snap pass migration**。建議第一個試 `fuse_close_endpoints`（已是 thickness-aware via masks、語意純粹 "cluster endpoints"、可以複用 `_run_merge_loop` 模式但 candidate 是 mutate-only）。如果順利再試 `manhattan_t_project`、`grid_snap_endpoints`。`snap_endpoints` 跟 `snap_colinear_coords` 跑在 pre-canonical、**不要嘗試**（step 6 phase 2 教訓）
+2. **case-specific pass 檢視** — fresh ablation csv 顯示 `truncate_overshoots` 只對 sg2 有強影響（IOU 0.83）、其他兩張 NO-OP。這種「修 A 壞 B」化石值得個別評估
+3. **step 5 ranking model** — 還是要等 step 7 完成再進。瓶頸是 30-50 張人工標註
+
+**下次開工前的 checklist**：
+1. `git log --oneline -10` 看最近狀態
+2. `py -3 regression.py` 應該 PASS（如果 FAIL 表示有未提交的破壞性改動，先 `git status`）
+3. 讀 todo.md 的 ✅ 完成行 + 下面「容易踩的雷」section
+4. 如果要做 step 7：讀 `_run_merge_loop` 跟 `collinear_merge_candidates` / `parallel_merge_candidates` 兩個範本，照同樣模式寫新 generator
+5. **絕對不要**在沒讓用戶看 overlay 前自己跑 `--update-baseline --yes`（feedback_baseline_update_protocol）
+
+**這次最大的教訓（用實例記住）**：
+- **「換實作不削 call site」不是失敗、是正確架構**。step 6 phase 4 原本想把 4 個 merge call 合成 1 個，後來發現位置 + 參數 + score 策略各自不同、硬合會回到「位置決定觸發」的反模式。改成「共用 generator infrastructure（多 call site）」才對。同樣思路適用於 step 7
+- **Score 函數的 `junction` term 對 "thick-wall ridge consolidation" 會誤判**。phase 3 用 `skip_score=True` 繞過。未來想完美用 score gate 必須給 score 加 thick-wall awareness（採樣牆厚區分真假 T-junction）
+- **Pre-canonical 階段 (canonical_line 之前) 不適用 candidate / score 架構**。score 信號太雜，pair-based vs cluster-based 行為差，難 match legacy。step 6 phase 2 試過、revert 了——下次別重蹈覆轍
 
 **Memory（給未來 session）**：
 - `feedback_no_git_push.md` — user 嚴禁 push，不要嘗試
