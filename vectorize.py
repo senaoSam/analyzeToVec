@@ -1863,6 +1863,60 @@ def _accept_bridge_candidates(lines: List[Dict],
     return current
 
 
+def _run_merge_loop(lines: List[Dict],
+                    *,
+                    regenerate,           # callable(segments) -> List[Candidate]
+                    sort_key=None,        # callable(Candidate) -> sortable
+                    skip_score: bool = False,  # if True, accept all candidates the generator emits
+                    wall_evidence: np.ndarray = None,
+                    door_mask: np.ndarray = None,
+                    window_mask: np.ndarray = None,
+                    ) -> List[Dict]:
+    """Shared fixed-point loop for any merge-style candidate stream.
+
+    Phase 1 (collinear, exact-line) and phase 3 (parallel, perp-tol) both
+    use this. Single-accept-then-regenerate (per todo.md L54), ``delta >=
+    0`` accept rule (merges are pure simplifications — see
+    ``_accept_merge_candidates``'s docstring for the rationale).
+    """
+    import candidates as C
+    import scoring as S
+
+    if not lines:
+        return list(lines)
+
+    current = list(lines)
+    base_score = S.compute_score(current,
+                                 wall_evidence=wall_evidence,
+                                 door_mask=door_mask,
+                                 window_mask=window_mask)
+
+    max_iter = 4 * len(lines) + 8
+    for _iter in range(max_iter):
+        cands = regenerate(current)
+        if not cands:
+            break
+        if sort_key is not None:
+            cands.sort(key=sort_key)
+
+        accepted_this_iter = False
+        for cand in cands:
+            trial = C.apply_candidate(current, cand)
+            trial_score = S.compute_score(trial,
+                                          wall_evidence=wall_evidence,
+                                          door_mask=door_mask,
+                                          window_mask=window_mask)
+            delta = trial_score.total - base_score.total
+            if skip_score or delta >= CANDIDATE_MIN_ACCEPT_DELTA:
+                current = trial
+                base_score = trial_score
+                accepted_this_iter = True
+                break
+        if not accepted_this_iter:
+            break
+    return current
+
+
 def _accept_merge_candidates(lines: List[Dict],
                              *,
                              perp_tol: float = 0.0,
@@ -1898,53 +1952,57 @@ def _accept_merge_candidates(lines: List[Dict],
     generator. For our typical ~150-segment inputs this terminates in
     1-3 passes (linear in chain length).
     """
-    import candidates as C
     import generators as G
-    import scoring as S
-
-    if not lines:
-        return list(lines)
-
-    current = list(lines)
-    base_score = S.compute_score(current,
-                                 wall_evidence=wall_evidence,
-                                 door_mask=door_mask,
-                                 window_mask=window_mask)
-
-    # Single-accept-then-regenerate (per todo.md L54: apply_candidate's
-    # remove+add conflicts with batch-accept loops because remove indices
-    # become stale after the first apply). Accept one candidate per
-    # iteration; regenerate against the new state.
-    max_iter = 4 * len(lines) + 8  # generous safety bound
-    for _iter in range(max_iter):
-        cands = G.collinear_merge_candidates(
-            current,
+    return _run_merge_loop(
+        lines,
+        regenerate=lambda segs: G.collinear_merge_candidates(
+            segs,
             perp_tol=perp_tol,
             gap_tol=gap_tol,
             junction_aware=junction_aware,
-        )
-        if not cands:
-            break
-        # Prefer smaller perp_dist (most-likely-genuine merge) then longest
-        # merged span (collapses biggest noise first).
-        cands.sort(key=lambda c: (c.meta["perp_dist"], -c.meta["merged_len"]))
+        ),
+        sort_key=lambda c: (c.meta["perp_dist"], -c.meta["merged_len"]),
+        wall_evidence=wall_evidence,
+        door_mask=door_mask,
+        window_mask=window_mask,
+    )
 
-        accepted_this_iter = False
-        for cand in cands:
-            trial = C.apply_candidate(current, cand)
-            trial_score = S.compute_score(trial,
-                                          wall_evidence=wall_evidence,
-                                          door_mask=door_mask,
-                                          window_mask=window_mask)
-            delta = trial_score.total - base_score.total
-            if delta >= CANDIDATE_MIN_ACCEPT_DELTA:
-                current = trial
-                base_score = trial_score
-                accepted_this_iter = True
-                break  # regenerate against new state
-        if not accepted_this_iter:
-            break
-    return current
+
+def _accept_parallel_merge_candidates(lines: List[Dict],
+                                       *,
+                                       perp_tol: float,
+                                       touch_perp_tol: float = 12.0,
+                                       min_overlap_ratio: float = 0.5,
+                                       skip_score: bool = False,
+                                       wall_evidence: np.ndarray = None,
+                                       door_mask: np.ndarray = None,
+                                       window_mask: np.ndarray = None,
+                                       ) -> List[Dict]:
+    """Step 6 phase 3: run ``generators.parallel_merge_candidates`` to a
+    fixed point. Replaces ``cluster_parallel_duplicates``.
+
+    Same accept rule (``delta >= 0``) and single-accept-then-regenerate
+    pattern as the phase-1 collinear loop. Sort prefers Case-1 (touching
+    near-collinear) over Case-2 (thick-wall parallel duplicate), then
+    tighter perp_dist, then longest merge: the tightest /genuine-ist
+    merges land first so subsequent iterations see the cleanest state.
+    """
+    import generators as G
+    return _run_merge_loop(
+        lines,
+        regenerate=lambda segs: G.parallel_merge_candidates(
+            segs,
+            perp_tol=perp_tol,
+            touch_perp_tol=touch_perp_tol,
+            min_overlap_ratio=min_overlap_ratio,
+        ),
+        sort_key=lambda c: (c.meta["case"], c.meta["perp_dist"],
+                            -c.meta["merged_len"]),
+        skip_score=skip_score,
+        wall_evidence=wall_evidence,
+        door_mask=door_mask,
+        window_mask=window_mask,
+    )
 
 
 def brute_force_ray_extend(lines: List[Dict],
@@ -2769,7 +2827,32 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #     post-gap-closing). Call removed.
 
     # --- WATERTIGHT CLOSURE (kill duplicates + close gaps) --------------
-    s7 = cluster_parallel_duplicates(s6, parallel_merge)
+    # Step 6 phase 3: candidate-based parallel merge replaces
+    # ``cluster_parallel_duplicates``. Same tols (perp_tol = 13 px *
+    # scale; inner touch_perp_tol = 12 px hardcoded; min_overlap_ratio
+    # = 0.5). Pair-based with fixed-point loop handles the legacy's
+    # graph-component transitivity.
+    #
+    # ``skip_score=True`` — the score function's ``junction`` term
+    # counts every degree-3+ node equally, which mis-judges thick-wall
+    # ridge consolidation: when a skeletonised thick wall produces two
+    # parallel ridges that each terminate at a T-junction, merging the
+    # ridges into one centerline necessarily reduces the apparent
+    # junction count even though the *real* (architectural) T-junction
+    # is preserved. The generator's geometric gates (perp_tol +
+    # min_overlap_ratio) are already strict enough to catch only valid
+    # merges, so we trust them here. (Phase 1's collinear merge runs
+    # the score because its candidates can include "merging that creates
+    # a wall-body crossing", which the score's ``invalid_crossing`` term
+    # catches well.)
+    s7 = _accept_parallel_merge_candidates(
+        s6,
+        perp_tol=parallel_merge,
+        skip_score=True,
+        wall_evidence=None,
+        door_mask=masks.get("door"),
+        window_mask=masks.get("window"),
+    )
     s7 = grid_snap_endpoints(s7, grid_snap)
     # manhattan_ultimate_merge (post-watertight) removed step 4.8 cleanup:
     # latest ablation shows it as NO-OP across all 3 images now that the

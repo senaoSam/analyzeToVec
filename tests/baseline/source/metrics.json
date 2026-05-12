@@ -10,16 +10,16 @@
   "graph": {
     "num_segments": 102,
     "count_by_type": {
-      "wall": 71,
       "window": 16,
-      "door": 15
+      "door": 15,
+      "wall": 71
     },
     "free_endpoints": 12,
     "num_short_segments": 0,
     "total_length_by_type": {
-      "wall": 5690.0,
       "window": 1398.0,
-      "door": 1031.0
+      "door": 1031.0,
+      "wall": 5690.0
     }
   },
   "thickness_px": {
@@ -44,6 +44,6 @@
       "loose": "door_loose.png"
     }
   },
-  "baseline_updated_at": "2026-05-12T10:49:19",
+  "baseline_updated_at": "2026-05-12T14:38:29",
   "baseline_updated_by": "manual_yes_flag"
 }

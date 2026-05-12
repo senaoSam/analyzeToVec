@@ -514,3 +514,130 @@ def collinear_merge_candidates(segments: List[Dict],
                 _emit(i, j, "v")
 
     return cands
+
+
+# ---------------------------------------------------------------------------
+# parallel_merge_candidates  (step 6, phase 3)
+# ---------------------------------------------------------------------------
+#
+# Subsumes ``cluster_parallel_duplicates``. Generates merge proposals for
+# pairs of same-type same-axis segments that fall into either of the two
+# legacy cases:
+#
+#   Case 1 (near-collinear touching): perp distance <= ``touch_perp_tol``
+#          AND along-axis bodies touch or overlap (overlap >= 0). Catches
+#          single-wall segments that the skeleton broke into a couple of
+#          pieces with a tiny perpendicular drift.
+#
+#   Case 2 (thick-wall parallel duplicate): perp distance <= ``perp_tol``
+#          (wider, ~13 px) AND along-axis body overlap >= ``min_overlap``
+#          x shorter segment length. Catches the parallel-ridges case
+#          where a thick wall mask skeletonised into two side-by-side
+#          centerlines.
+#
+# Pair-based (not cluster-based) by design: the score-and-accept loop's
+# fixed-point iteration handles transitive merges (A+B, then (AB)+C in
+# the next iteration), and pair candidates preserve the partial-accept
+# semantics that all-or-nothing cluster candidates lose.
+#
+# Pipeline position: runs AFTER canonicalize_offsets and the manhattan
+# snaps, so coordinates are settled. This is the post-canonical
+# environment that phase 1 worked in — score deltas are reliable here,
+# unlike phase 2's pre-canonical experiment.
+
+PARALLEL_TOUCH_PERP_TOL_PX = 12.0   # cluster_parallel_duplicates' inner TOUCH_PERP_TOL
+PARALLEL_MIN_OVERLAP_RATIO = 0.5    # cluster_parallel_duplicates' >= 0.5 * shorter
+
+
+def parallel_merge_candidates(segments: List[Dict],
+                               *,
+                               perp_tol: float,
+                               touch_perp_tol: float = PARALLEL_TOUCH_PERP_TOL_PX,
+                               min_overlap_ratio: float = PARALLEL_MIN_OVERLAP_RATIO,
+                               ) -> List[C.Candidate]:
+    """Pair-based parallel-merge proposals, mirroring legacy
+    ``cluster_parallel_duplicates`` semantics."""
+    if not segments:
+        return []
+
+    h_groups: Dict[str, List[int]] = {}
+    v_groups: Dict[str, List[int]] = {}
+    for i, s in enumerate(segments):
+        ax = _axis_of(s)
+        if ax == "h":
+            h_groups.setdefault(s["type"], []).append(i)
+        elif ax == "v":
+            v_groups.setdefault(s["type"], []).append(i)
+
+    cands: List[C.Candidate] = []
+
+    def _emit_pair(i: int, j: int, axis: str) -> None:
+        a, b = segments[i], segments[j]
+        if axis == "h":
+            a_lo, a_hi = sorted((a["x1"], a["x2"]))
+            b_lo, b_hi = sorted((b["x1"], b["x2"]))
+            a_line, b_line = a["y1"], b["y1"]
+        else:
+            a_lo, a_hi = sorted((a["y1"], a["y2"]))
+            b_lo, b_hi = sorted((b["y1"], b["y2"]))
+            a_line, b_line = a["x1"], b["x1"]
+
+        dline = abs(a_line - b_line)
+        if dline > perp_tol + 1e-9:
+            return
+
+        len_a = a_hi - a_lo
+        len_b = b_hi - b_lo
+        overlap_lo, overlap_hi = max(a_lo, b_lo), min(a_hi, b_hi)
+        overlap = overlap_hi - overlap_lo  # >= 0 if bodies touch/overlap
+        shorter = min(len_a, len_b)
+
+        # Case 1: near-collinear touching/overlapping
+        case_1 = (dline <= touch_perp_tol + 1e-9) and (overlap >= -1e-6)
+        # Case 2: thick-wall parallel duplicate
+        case_2 = (shorter > 0) and (overlap > 0) and \
+                 (overlap >= min_overlap_ratio * shorter - 1e-9)
+
+        if not (case_1 or case_2):
+            return
+
+        lo = min(a_lo, b_lo)
+        hi = max(a_hi, b_hi)
+        wsum = max(len_a + len_b, 1e-9)
+        canon_line = (len_a * a_line + len_b * b_line) / wsum
+
+        if axis == "h":
+            merged = {"type": a["type"], "x1": lo, "y1": canon_line,
+                      "x2": hi, "y2": canon_line}
+        else:
+            merged = {"type": a["type"], "x1": canon_line, "y1": lo,
+                      "x2": canon_line, "y2": hi}
+
+        cands.append(C.Candidate(
+            op="merge",
+            add=[merged],
+            remove=[i, j],
+            mutate=[],
+            meta={
+                "axis": axis,
+                "merged_len": hi - lo,
+                "perp_dist": dline,
+                "overlap": max(0.0, overlap),
+                "case": 1 if case_1 else 2,
+            },
+        ))
+
+    for t, idxs in h_groups.items():
+        for i in idxs:
+            for j in idxs:
+                if j <= i:
+                    continue
+                _emit_pair(i, j, "h")
+    for t, idxs in v_groups.items():
+        for i in idxs:
+            for j in idxs:
+                if j <= i:
+                    continue
+                _emit_pair(i, j, "v")
+
+    return cands
