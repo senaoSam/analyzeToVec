@@ -863,7 +863,8 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                           *,
                           wall_evidence: np.ndarray = None,
                           door_mask: np.ndarray = None,
-                          window_mask: np.ndarray = None) -> List[Dict]:
+                          window_mask: np.ndarray = None,
+                          audit_recorder=None) -> List[Dict]:
     """Candidate-based step-4 implementation.
 
     Same outer structure as the legacy (up to 6 sweep passes), but every
@@ -1074,7 +1075,16 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                                           window_mask=window_mask,
                                           wall_mask=wall_mask_local)
             delta = trial_score.total - base_score.total
-            if delta > CANDIDATE_MIN_ACCEPT_DELTA:
+            accept = delta > CANDIDATE_MIN_ACCEPT_DELTA
+            if audit_recorder is not None:
+                delta_terms = {k: trial_score.terms.get(k, 0.0) - base_score.terms.get(k, 0.0)
+                               for k in set(trial_score.terms) | set(base_score.terms)}
+                audit_recorder.record(
+                    op=cand.op, accepted=accept, delta=delta,
+                    delta_terms=delta_terms, meta=cand.meta,
+                    reason="score_gate",
+                )
+            if accept:
                 current = trial
                 base_score = trial_score
                 for (idx, end, _, _) in cand.mutate:
@@ -1125,6 +1135,7 @@ def _accept_bridge_candidates(lines: List[Dict],
                                wall_evidence: np.ndarray = None,
                                door_mask: np.ndarray = None,
                                window_mask: np.ndarray = None,
+                               audit_recorder=None,
                                ) -> List[Dict]:
     """Run ``generators.proximal_bridge_candidates`` and accept those whose
     pipeline-score delta is strictly positive.
@@ -1173,6 +1184,11 @@ def _accept_bridge_candidates(lines: List[Dict],
         ka = (int(round(ea[0])), int(round(ea[1])))
         kb = (int(round(eb[0])), int(round(eb[1])))
         if ka in used_endpoints or kb in used_endpoints:
+            if audit_recorder is not None:
+                audit_recorder.record(
+                    op=cand.op, accepted=False, delta=0.0,
+                    meta=cand.meta, reason="used_endpoint",
+                )
             continue
         trial = C.apply_candidate(current, cand)
         trial_score = S.compute_score(trial,
@@ -1181,7 +1197,16 @@ def _accept_bridge_candidates(lines: List[Dict],
                                       window_mask=window_mask,
                                       wall_mask=wall_mask)
         delta = trial_score.total - base_score.total
-        if delta > CANDIDATE_MIN_ACCEPT_DELTA:
+        accept = delta > CANDIDATE_MIN_ACCEPT_DELTA
+        if audit_recorder is not None:
+            delta_terms = {k: trial_score.terms.get(k, 0.0) - base_score.terms.get(k, 0.0)
+                           for k in set(trial_score.terms) | set(base_score.terms)}
+            audit_recorder.record(
+                op=cand.op, accepted=accept, delta=delta,
+                delta_terms=delta_terms, meta=cand.meta,
+                reason="score_gate",
+            )
+        if accept:
             current = trial
             base_score = trial_score
             used_endpoints.add(ka)
@@ -1198,6 +1223,7 @@ def _run_merge_loop(lines: List[Dict],
                     door_mask: np.ndarray = None,
                     window_mask: np.ndarray = None,
                     wall_mask: np.ndarray = None,
+                    audit_recorder=None,
                     ) -> List[Dict]:
     """Shared fixed-point loop for any merge-style candidate stream.
 
@@ -1245,7 +1271,19 @@ def _run_merge_loop(lines: List[Dict],
                                           window_mask=window_mask,
                                           wall_mask=wall_mask)
             delta = trial_score.total - base_score.total
-            if skip_score or delta >= CANDIDATE_MIN_ACCEPT_DELTA:
+            accept = skip_score or delta >= CANDIDATE_MIN_ACCEPT_DELTA
+            if audit_recorder is not None:
+                delta_terms = {k: trial_score.terms.get(k, 0.0) - base_score.terms.get(k, 0.0)
+                               for k in set(trial_score.terms) | set(base_score.terms)}
+                audit_recorder.record(
+                    op=cand.op,
+                    accepted=accept,
+                    delta=delta,
+                    delta_terms=delta_terms,
+                    meta=cand.meta,
+                    reason="skip_score" if skip_score else "score_gate",
+                )
+            if accept:
                 current = trial
                 base_score = trial_score
                 accepted_this_iter = True
@@ -1264,6 +1302,7 @@ def _accept_merge_candidates(lines: List[Dict],
                              door_mask: np.ndarray = None,
                              window_mask: np.ndarray = None,
                              wall_mask: np.ndarray = None,
+                             audit_recorder=None,
                              ) -> List[Dict]:
     """Run ``generators.collinear_merge_candidates`` to a fixed point.
 
@@ -1305,6 +1344,7 @@ def _accept_merge_candidates(lines: List[Dict],
         door_mask=door_mask,
         window_mask=window_mask,
         wall_mask=wall_mask,
+        audit_recorder=audit_recorder,
     )
 
 
@@ -1318,6 +1358,7 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
                                        door_mask: np.ndarray = None,
                                        window_mask: np.ndarray = None,
                                        wall_mask: np.ndarray = None,
+                                       audit_recorder=None,
                                        ) -> List[Dict]:
     """Step 6 phase 3: run ``generators.parallel_merge_candidates`` to a
     fixed point. Replaces ``cluster_parallel_duplicates``.
@@ -1344,6 +1385,7 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
         door_mask=door_mask,
         window_mask=window_mask,
         wall_mask=wall_mask,
+        audit_recorder=audit_recorder,
     )
 
 
@@ -1734,6 +1776,7 @@ def _accept_fuse_candidates(lines: List[Dict],
                              door_mask: np.ndarray = None,
                              window_mask: np.ndarray = None,
                              wall_mask: np.ndarray = None,
+                             audit_recorder=None,
                              ) -> List[Dict]:
     """Step 7 phase 1: candidate-based ``fuse_close_endpoints``.
 
@@ -1792,6 +1835,7 @@ def _accept_fuse_candidates(lines: List[Dict],
         door_mask=door_mask,
         window_mask=window_mask,
         wall_mask=wall_mask,
+        audit_recorder=audit_recorder,
     )
 
 
@@ -1801,7 +1845,8 @@ def brute_force_ray_extend(lines: List[Dict],
                            *,
                            wall_evidence: np.ndarray = None,
                            door_mask: np.ndarray = None,
-                           window_mask: np.ndarray = None) -> None:
+                           window_mask: np.ndarray = None,
+                           audit_recorder=None) -> None:
     """Candidate-based step-4 implementation of the brute-force ray pass.
 
     Each loose endpoint generates at most one Candidate: snap it onto the
@@ -1938,6 +1983,11 @@ def brute_force_ray_extend(lines: List[Dict],
         for cand in cands:
             if any((idx, end) in used_mutations
                    for (idx, end, _, _) in cand.mutate):
+                if audit_recorder is not None:
+                    audit_recorder.record(
+                        op=cand.op, accepted=False, delta=0.0,
+                        meta=cand.meta, reason="used_endpoint",
+                    )
                 continue
             trial = C.apply_candidate(current, cand)
             trial_score = S.compute_score(trial,
@@ -1945,7 +1995,16 @@ def brute_force_ray_extend(lines: List[Dict],
                                           door_mask=door_mask,
                                           window_mask=window_mask)
             delta = trial_score.total - base_score.total
-            if delta > CANDIDATE_MIN_ACCEPT_DELTA:
+            accept = delta > CANDIDATE_MIN_ACCEPT_DELTA
+            if audit_recorder is not None:
+                delta_terms = {k: trial_score.terms.get(k, 0.0) - base_score.terms.get(k, 0.0)
+                               for k in set(trial_score.terms) | set(base_score.terms)}
+                audit_recorder.record(
+                    op=cand.op, accepted=accept, delta=delta,
+                    delta_terms=delta_terms, meta=cand.meta,
+                    reason="score_gate",
+                )
+            if accept:
                 current = trial
                 base_score = trial_score
                 for (idx, end, _, _) in cand.mutate:
@@ -2005,7 +2064,8 @@ def insert_missing_connectors(lines: List[Dict],
                               *,
                               wall_evidence: np.ndarray = None,
                               door_mask: np.ndarray = None,
-                              window_mask: np.ndarray = None) -> None:
+                              window_mask: np.ndarray = None,
+                              audit_recorder=None) -> None:
     """Candidate-based step-4 implementation of the gap-close pass.
 
     Generates one Candidate per (loose-endpoint, loose-endpoint) pair that
@@ -2142,8 +2202,18 @@ def insert_missing_connectors(lines: List[Dict],
         # consumed by at most one accepted candidate.
         eps = cand.meta["endpoints"]
         if eps[0] in used_endpoints or eps[1] in used_endpoints:
+            if audit_recorder is not None:
+                audit_recorder.record(
+                    op=cand.op, accepted=False, delta=0.0,
+                    meta=cand.meta, reason="used_endpoint",
+                )
             continue
         if any((idx, end) in used_mutations for (idx, end, _, _) in cand.mutate):
+            if audit_recorder is not None:
+                audit_recorder.record(
+                    op=cand.op, accepted=False, delta=0.0,
+                    meta=cand.meta, reason="used_mutation",
+                )
             continue
 
         trial = C.apply_candidate(current, cand)
@@ -2153,7 +2223,16 @@ def insert_missing_connectors(lines: List[Dict],
                                       window_mask=window_mask,
                                       wall_mask=wall_mask)
         delta = trial_score.total - base_score.total
-        if delta > CANDIDATE_MIN_ACCEPT_DELTA:
+        accept = delta > CANDIDATE_MIN_ACCEPT_DELTA
+        if audit_recorder is not None:
+            delta_terms = {k: trial_score.terms.get(k, 0.0) - base_score.terms.get(k, 0.0)
+                           for k in set(trial_score.terms) | set(base_score.terms)}
+            audit_recorder.record(
+                op=cand.op, accepted=accept, delta=delta,
+                delta_terms=delta_terms, meta=cand.meta,
+                reason="score_gate",
+            )
+        if accept:
             current = trial
             base_score = trial_score
             for (idx, end, _, _) in cand.mutate:
@@ -2422,11 +2501,19 @@ def _resolve_src_path(name: str) -> str:
     return candidate
 
 
-def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
+def vectorize_bgr(bgr: np.ndarray, *,
+                  verbose: bool = False,
+                  audit_path: Optional[str] = None) -> Dict:
     """Pure pipeline: BGR ndarray in, dict ``{"lines": [...], "stats": {...}}`` out.
 
     No filesystem I/O, no print spam (unless ``verbose=True``). This is the
     function the API calls — ``run_one`` is a thin I/O wrapper around it.
+
+    ``audit_path``: if provided, create an :class:`audit.AuditRecorder`,
+    thread it into every score-using wrapper, and dump the events as
+    JSON to ``audit_path`` at the end. Default-off (None) so the pipeline
+    is unchanged. Useful for training-data extraction for step 5 ranking
+    model and for debugging which score terms drove which decisions.
     """
     def _log(msg: str) -> None:
         if verbose:
@@ -2436,6 +2523,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         raise ValueError("empty image")
     if bgr.ndim != 3 or bgr.shape[2] != 3:
         raise ValueError(f"expected BGR image, got shape {bgr.shape}")
+
+    audit_recorder = None
+    if audit_path is not None:
+        from audit import AuditRecorder
+        audit_recorder = AuditRecorder()
 
     h, w = bgr.shape[:2]
     _log(f"Image size: {w} x {h} px")
@@ -2511,7 +2603,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # uses ``skip_score=True`` -- only the geometric gate matters, which
     # is identical between the legacy 1D cluster and the candidate-based
     # one.
-    s1 = _accept_fuse_candidates(s1, fallback_tol=colinear_tol, masks=None)
+    s1 = _accept_fuse_candidates(s1, fallback_tol=colinear_tol, masks=None,
+                                  audit_recorder=audit_recorder)
 
     # (2) Merge collinear same-type segments into a single longest span.
     # Step 8 phase 2: candidate-based cluster_collinear_merge replaces
@@ -2639,6 +2732,7 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
         wall_mask=masks.get("wall"),
+        audit_recorder=audit_recorder,
     )
     # Step 7 phase 3: candidate-based wrapper. ``grid_snap_endpoints`` is
     # semantically identical to ``manhattan_t_project`` -- same wall-
@@ -2666,7 +2760,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # (2) T-snap with trunk auto-extension: a loose endpoint that projects
     #     past a trunk's body within tol triggers an extension of the trunk.
     #     The masks gate prevents extending through white space.
-    s8 = t_snap_with_extension(s7, gap_close, masks=masks)
+    s8 = t_snap_with_extension(s7, gap_close, masks=masks,
+                                audit_recorder=audit_recorder)
     # manhattan_ultimate_merge (post-gap-closing) removed step 4.8: NO-OP
     # in latest ablation.
 
@@ -2675,7 +2770,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # --- BRUTE-FORCE RAY EXTENSION (final-final closure, IN PLACE) ------
     # Operates directly on the same dict objects that get serialized to JSON.
     # No copies, no graph indirection — every mutation lands in the output.
-    brute_force_ray_extend(snapped, ray_ext, RAY_EXT_LOOSE_PX)
+    brute_force_ray_extend(snapped, ray_ext, RAY_EXT_LOOSE_PX,
+                            audit_recorder=audit_recorder)
     # Defensive filter: ray extension may have collapsed a short segment to
     # a single point (both endpoints coincide). These zero-length segments
     # corrupt the loose-endpoint detection downstream because they
@@ -2709,7 +2805,8 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # cluster_parallel_duplicates; until then both passes coexist.
     insert_missing_connectors(snapped, colinear_loose,
                               connector_max,
-                              wall_mask=masks.get("wall"))
+                              wall_mask=masks.get("wall"),
+                              audit_recorder=audit_recorder)
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Proximal bridge generator: for any pair of wall endpoints within
     # ``l_ext_asym`` × scale of each other that aren't already coincident,
@@ -2726,6 +2823,7 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         wall_evidence=None,  # falls back to (wall_mask>0) as float32
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
+        audit_recorder=audit_recorder,
     )
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Final 2-px endpoint fusion: snap any near-coincident endpoints to one
@@ -2746,6 +2844,7 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         wall_evidence=None,
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
+        audit_recorder=audit_recorder,
     )
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
     # Step 6 phase 1: one last collinear merge in case ray extension /
@@ -2770,6 +2869,7 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
         wall_mask=masks.get("wall"),  # step 11: thick-wall-aware junction
+        audit_recorder=audit_recorder,
     )
 
     # Strip pipeline-internal fields (e.g. ``local_thickness`` from
@@ -2807,6 +2907,14 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
         _log(f"  diagonal seg count  : {n_diag}  (must be 0)")
         _log(f"  endpoint degree hist: {dict(sorted(deg_hist.items()))}")
         _log(f"  free endpoints (d=1): {deg_hist.get(1, 0)}  (lower = more watertight)")
+
+    if audit_recorder is not None and audit_path is not None:
+        audit_recorder.dump_json(audit_path)
+        if verbose:
+            summary = audit_recorder.summary()
+            _log(f"  audit events        : {summary['total']} -> {audit_path}")
+            for op, counts in sorted(summary["by_op"].items()):
+                _log(f"    {op:24s} accepted={counts['accepted']:4d}  rejected={counts['rejected']:4d}")
 
     return {
         "lines": snapped,
