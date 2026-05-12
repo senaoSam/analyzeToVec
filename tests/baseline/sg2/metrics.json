@@ -6,18 +6,18 @@
     2048,
     2048
   ],
-  "hash": "641bbbbb066243dc4014477040c88efb9944d2e2",
+  "hash": "b944aa462ee073b860dfa8bbc5aa6eec130f05c9",
   "graph": {
-    "num_segments": 128,
+    "num_segments": 126,
     "count_by_type": {
-      "wall": 99,
+      "wall": 96,
       "window": 13,
-      "door": 16
+      "door": 17
     },
-    "free_endpoints": 23,
+    "free_endpoints": 24,
     "num_short_segments": 0,
     "total_length_by_type": {
-      "wall": 17351.0,
+      "wall": 17152.0,
       "window": 2141.0,
       "door": 1684.0
     }
@@ -44,6 +44,6 @@
       "loose": "door_loose.png"
     }
   },
-  "baseline_updated_at": "2026-05-12T10:10:39",
+  "baseline_updated_at": "2026-05-12T10:49:17",
   "baseline_updated_by": "manual_yes_flag"
 }

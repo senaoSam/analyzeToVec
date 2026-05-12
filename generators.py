@@ -323,3 +323,194 @@ def proximal_bridge_candidates(segments: List[Dict],
                 ))
 
     return cands
+
+
+# ---------------------------------------------------------------------------
+# collinear_merge_candidates  (step 6, phase 1)
+# ---------------------------------------------------------------------------
+#
+# Replaces the family of merge passes (``merge_collinear`` x2,
+# ``cluster_parallel_duplicates``, ``manhattan_ultimate_merge``) with a single
+# generator. Phase 1 covers the strict "exact-same-line + touching-or-
+# overlapping" case (manhattan_ultimate_merge semantics); phases 2 / 3 will
+# add the gap-tolerant collinear case and the perp-tolerant parallel-duplicate
+# case respectively. Junction-awareness from the legacy pass is preserved:
+# a candidate is *not* generated when the would-be interior point of the
+# merged span coincides with an endpoint of any segment outside the pair.
+
+_MERGE_QUANTIZE = 100  # 0.01-px grid for robust endpoint equality
+
+
+def _qk(x: float, y: float) -> Tuple[int, int]:
+    return (int(round(x * _MERGE_QUANTIZE)), int(round(y * _MERGE_QUANTIZE)))
+
+
+def collinear_merge_candidates(segments: List[Dict],
+                                *,
+                                perp_tol: float = 0.0,
+                                gap_tol: float = 0.0,
+                                junction_aware: bool = True,
+                                ) -> List[C.Candidate]:
+    """Propose merge candidates for pairs of same-type, same-axis segments.
+
+    For phase 1 the default tolerances reproduce the legacy
+    ``manhattan_ultimate_merge``:
+
+      - ``perp_tol = 0``: only segments with bit-identical line coordinate
+        are paired (after the 0.01-px quantisation that the legacy uses
+        for float robustness)
+      - ``gap_tol = 0``: bodies must touch or overlap (``hi_a >= lo_b``)
+      - ``junction_aware = True``: refuse to merge when the would-be
+        interior coordinate is shared by an endpoint of any segment
+        outside the bucket (preserves explicit T-junctions)
+
+    Each emitted candidate carries ``remove=[i, j]`` and
+    ``add=[merged_seg]``; the score-and-accept loop then decides whether
+    to take it. The merged segment's line coordinate is a length-weighted
+    mean (matches ``cluster_parallel_duplicates``); for the strict
+    ``perp_tol=0`` case this is equivalent to either input's line.
+
+    Phases 2 / 3 will widen the gates by passing ``perp_tol > 0`` and
+    ``gap_tol > 0``; the generator itself does not need to change.
+    """
+    if not segments:
+        return []
+
+    # Bucket axis-aligned segments by (type, axis, quantised line coord).
+    # With ``perp_tol > 0`` the same segment may land in two adjacent
+    # buckets (the quantisation grid is 0.01 px so the over-bucketing
+    # only happens at the exact tol boundary); we de-dup pairs at the
+    # end via a seen-set keyed by (min(i,j), max(i,j)).
+    h_buckets: Dict[Tuple[str, int], List[int]] = {}
+    v_buckets: Dict[Tuple[str, int], List[int]] = {}
+
+    def _line_keys(line: float) -> List[int]:
+        """Quantised line coordinate(s) for bucketing.
+
+        With perp_tol=0 returns one key (the rounded coord). With perp_tol>0
+        we also insert the segment into neighbouring quantised buckets so
+        a pair whose line coords differ by <= perp_tol still meets in at
+        least one bucket.
+        """
+        base = int(round(line * _MERGE_QUANTIZE))
+        if perp_tol <= 0:
+            return [base]
+        span = int(np.ceil(perp_tol * _MERGE_QUANTIZE))
+        return list(range(base - span, base + span + 1))
+
+    for i, s in enumerate(segments):
+        ax = _axis_of(s)
+        if ax == "h":
+            for k in _line_keys(s["y1"]):
+                h_buckets.setdefault((s["type"], k), []).append(i)
+        elif ax == "v":
+            for k in _line_keys(s["x1"]):
+                v_buckets.setdefault((s["type"], k), []).append(i)
+
+    # Endpoint counter for junction-aware filter (global, across all
+    # segments — an external endpoint at the would-be interior is a
+    # T-junction the merge would destroy).
+    endpoint_count: Dict[Tuple[int, int], int] = {}
+    for s in segments:
+        for end in ("1", "2"):
+            k = _qk(s[f"x{end}"], s[f"y{end}"])
+            endpoint_count[k] = endpoint_count.get(k, 0) + 1
+
+    cands: List[C.Candidate] = []
+    seen_pairs: set = set()
+
+    def _emit(i: int, j: int, axis: str) -> None:
+        if i == j:
+            return
+        key = (min(i, j), max(i, j))
+        if key in seen_pairs:
+            return
+        a, b = segments[i], segments[j]
+        # Same type guaranteed by bucket key, axis guaranteed by bucket choice.
+        if axis == "h":
+            a_lo, a_hi = sorted((a["x1"], a["x2"]))
+            b_lo, b_hi = sorted((b["x1"], b["x2"]))
+            a_line, b_line = a["y1"], b["y1"]
+        else:
+            a_lo, a_hi = sorted((a["y1"], a["y2"]))
+            b_lo, b_hi = sorted((b["y1"], b["y2"]))
+            a_line, b_line = a["x1"], b["x1"]
+
+        if abs(a_line - b_line) > perp_tol + 1e-9:
+            return  # filter spurious cross-bucket pairs
+
+        # Touching/overlapping check (in along-axis dimension).
+        lo, hi = min(a_lo, b_lo), max(a_hi, b_hi)
+        overlap_lo, overlap_hi = max(a_lo, b_lo), min(a_hi, b_hi)
+        gap = overlap_lo - overlap_hi  # positive when there is a real gap
+        if gap > gap_tol + 1e-9:
+            return  # bodies neither touch nor overlap within tol
+
+        # Junction-aware: if the merged span has an internal coordinate
+        # that is also an external endpoint, refuse. Internal coords here
+        # are any endpoint of either input that becomes strictly interior
+        # of the union (i.e. is not lo or hi of the merged span).
+        if junction_aware:
+            cand_endpoints = [(a["x1"], a["y1"]), (a["x2"], a["y2"]),
+                              (b["x1"], b["y1"]), (b["x2"], b["y2"])]
+            own_keys = {_qk(x, y) for (x, y) in cand_endpoints}
+            for (ex, ey) in cand_endpoints:
+                # Is this endpoint strictly interior to the merged span?
+                along = ex if axis == "h" else ey
+                if abs(along - lo) < 1e-6 or abs(along - hi) < 1e-6:
+                    continue  # it's a span boundary, not interior
+                # Check if any segment OUTSIDE this pair also has an
+                # endpoint here. The endpoint_count includes both pair
+                # contributions; subtract them to get the external count.
+                k = _qk(ex, ey)
+                own_contrib = sum(1 for (cx, cy) in cand_endpoints
+                                  if _qk(cx, cy) == k)
+                external = endpoint_count.get(k, 0) - own_contrib
+                if external > 0:
+                    return  # merging would bury an external T-junction
+        seen_pairs.add(key)
+
+        # Length-weighted line coordinate.
+        len_a = a_hi - a_lo
+        len_b = b_hi - b_lo
+        wsum = max(len_a + len_b, 1e-9)
+        canon_line = (len_a * a_line + len_b * b_line) / wsum
+
+        if axis == "h":
+            merged = {"type": a["type"], "x1": lo, "y1": canon_line,
+                      "x2": hi, "y2": canon_line}
+        else:
+            merged = {"type": a["type"], "x1": canon_line, "y1": lo,
+                      "x2": canon_line, "y2": hi}
+
+        cands.append(C.Candidate(
+            op="merge",
+            add=[merged],
+            remove=[i, j],
+            mutate=[],
+            meta={
+                "axis": axis,
+                "merged_len": hi - lo,
+                "gap": max(0.0, gap),
+                "perp_dist": abs(a_line - b_line),
+            },
+        ))
+
+    for (_type, _key), idxs in h_buckets.items():
+        if len(idxs) < 2:
+            continue
+        for i in idxs:
+            for j in idxs:
+                if j <= i:
+                    continue
+                _emit(i, j, "h")
+    for (_type, _key), idxs in v_buckets.items():
+        if len(idxs) < 2:
+            continue
+        for i in idxs:
+            for j in idxs:
+                if j <= i:
+                    continue
+                _emit(i, j, "v")
+
+    return cands

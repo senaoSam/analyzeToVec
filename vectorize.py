@@ -1863,6 +1863,90 @@ def _accept_bridge_candidates(lines: List[Dict],
     return current
 
 
+def _accept_merge_candidates(lines: List[Dict],
+                             *,
+                             perp_tol: float = 0.0,
+                             gap_tol: float = 0.0,
+                             junction_aware: bool = True,
+                             wall_evidence: np.ndarray = None,
+                             door_mask: np.ndarray = None,
+                             window_mask: np.ndarray = None,
+                             ) -> List[Dict]:
+    """Run ``generators.collinear_merge_candidates`` to a fixed point.
+
+    Each iteration regenerates candidates against the current state, ranks
+    them by (smallest perp_dist, longest merge), and accepts each whose
+    pipeline-score delta is **non-negative** (``>= 0``).
+
+    Why ``>= 0`` (rather than the ``> 0`` used by every other candidate
+    pass): a merge candidate is a pure simplification — two collinear
+    touching segments fold into one rendering identically. The score
+    function's only positive signals for this are (a) the ``duplicate``
+    term (which only counts body-overlapping pairs, missing the
+    touching-only case) and (b) the ``free_endpoint`` term (which only
+    fires when the merge merges loose ends, again missing the
+    interior-touch case). Clean touching-merges therefore score
+    delta=0, which the strict ``> 0`` rule would reject. We accept on
+    tie because the generator's gates already guarantee the candidate
+    is structurally safe (same axis, junction-aware filter rejects
+    T-junction destruction). Score is the *safety net*, not the
+    primary decision: a merge that would destroy a real junction shows
+    delta < 0 via the ``junction`` term and falls through.
+
+    Greedy with regenerate: each accepted merge changes the segment
+    list; rather than try to invalidate-and-keep, we re-run the
+    generator. For our typical ~150-segment inputs this terminates in
+    1-3 passes (linear in chain length).
+    """
+    import candidates as C
+    import generators as G
+    import scoring as S
+
+    if not lines:
+        return list(lines)
+
+    current = list(lines)
+    base_score = S.compute_score(current,
+                                 wall_evidence=wall_evidence,
+                                 door_mask=door_mask,
+                                 window_mask=window_mask)
+
+    # Single-accept-then-regenerate (per todo.md L54: apply_candidate's
+    # remove+add conflicts with batch-accept loops because remove indices
+    # become stale after the first apply). Accept one candidate per
+    # iteration; regenerate against the new state.
+    max_iter = 4 * len(lines) + 8  # generous safety bound
+    for _iter in range(max_iter):
+        cands = G.collinear_merge_candidates(
+            current,
+            perp_tol=perp_tol,
+            gap_tol=gap_tol,
+            junction_aware=junction_aware,
+        )
+        if not cands:
+            break
+        # Prefer smaller perp_dist (most-likely-genuine merge) then longest
+        # merged span (collapses biggest noise first).
+        cands.sort(key=lambda c: (c.meta["perp_dist"], -c.meta["merged_len"]))
+
+        accepted_this_iter = False
+        for cand in cands:
+            trial = C.apply_candidate(current, cand)
+            trial_score = S.compute_score(trial,
+                                          wall_evidence=wall_evidence,
+                                          door_mask=door_mask,
+                                          window_mask=window_mask)
+            delta = trial_score.total - base_score.total
+            if delta >= CANDIDATE_MIN_ACCEPT_DELTA:
+                current = trial
+                base_score = trial_score
+                accepted_this_iter = True
+                break  # regenerate against new state
+        if not accepted_this_iter:
+            break
+    return current
+
+
 def brute_force_ray_extend(lines: List[Dict],
                            tol: float,
                            loose_tol: float,
@@ -2772,9 +2856,28 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     # every endpoint resolves via clamp(0.25*thickness, 2, 6)).
     fuse_close_endpoints(snapped, ray_fuse, masks=masks)
     snapped = [s for s in snapped if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-    # One last collinear merge in case ray extension produced overlapping
-    # spans that can now coalesce.
-    snapped = manhattan_ultimate_merge(snapped)
+    # Step 6 phase 1: one last collinear merge in case ray extension /
+    # bridge generator produced overlapping spans that can now coalesce.
+    # Implemented as a candidate-based fixed-point loop with
+    # ``perp_tol=0`` + ``gap_tol=0`` + junction-aware filter, matching
+    # the legacy ``manhattan_ultimate_merge`` semantics exactly. The
+    # ``delta >= 0`` accept rule (vs the strict ``> 0`` used by every
+    # other candidate pass) is needed because clean touching-merges
+    # produce delta=0 — the score's only positive merge signals are
+    # body-overlap-aware (``duplicate`` term, only counts overlapping
+    # bodies) and free-endpoint-aware (``free_endpoint``, only fires on
+    # loose-end merges); neither rewards "two touching pieces become
+    # one" cleanly. The generator's gates already enforce structural
+    # safety, so accepting ties is correct here.
+    snapped = _accept_merge_candidates(
+        snapped,
+        perp_tol=0.0,
+        gap_tol=0.0,
+        junction_aware=True,
+        wall_evidence=None,  # binary wall mask used as evidence by score
+        door_mask=masks.get("door"),
+        window_mask=masks.get("window"),
+    )
 
     # Strip pipeline-internal fields (e.g. ``local_thickness`` from
     # canonical_line) so the public JSON payload stays canonical
