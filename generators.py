@@ -1245,3 +1245,119 @@ def axis_align_candidates(segments: List[Dict],
                 ))
         # else: diagonal beyond tol cone -- pass through, no candidate.
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 9 phase 2: truncate_overshoot_candidates  (replaces truncate_overshoots)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``truncate_overshoots``: for each axis-aligned segment's endpoint,
+# scan every orthogonal segment. If the endpoint is within ``tol`` of the
+# trunk's line AND the trunk's body covers the endpoint's along-axis coord
+# (within tol) AND the segment's OTHER endpoint is on the opposite side of
+# the trunk's line (i.e. the segment crosses through the trunk by a small
+# margin), pull the endpoint back to the trunk's line. Only the
+# perpendicular coord is mutated; the segment's own line coord stays.
+#
+# The "crossing" check ``(ex - line_x) * (far_x - line_x) < 0`` is the
+# distinguishing gate vs ``t_project_candidates``: t_project pulls
+# endpoints onto a trunk regardless of side; truncate_overshoots only
+# fires when the segment genuinely passes through the trunk by a few px.
+# This is a different semantic that t_project's generator deliberately
+# doesn't capture.
+#
+# Each endpoint takes AT MOST one mutation (matches legacy's iterative
+# fallback by accepting the first valid trunk under the closest-wins
+# tie-break). ``used_endpoints`` set enforces this in the wrapper.
+
+def truncate_overshoot_candidates(segments: List[Dict],
+                                   tol: float,
+                                   ) -> List[C.Candidate]:
+    """Emit one mutate-only candidate per endpoint that overshoots an
+    orthogonal trunk within ``tol`` and crosses through it.
+
+    Mirrors legacy ``vectorize.truncate_overshoots`` bit-identically by
+    simulating the order-dependent mutation cascade in a local copy:
+
+      * legacy iterates ``(i, end)`` then inner ``j``, mutating ``segs[i]``
+        in place; subsequent ``(i', end')`` iterations read the mutated
+        state when scanning trunks
+      * our simulation runs the same nested loop on a local ``segs_sim``;
+        when an iteration mutates ``segs_sim[i]`` later iterations see
+        the new coords (because we sample the trunk's coord from
+        ``segs_sim[j]`` LIVE inside the inner loop)
+      * after the full simulation each mutated endpoint's *final*
+        coord is captured as one ``Candidate``; applying these to the
+        original input via ``apply_candidate`` reproduces the legacy
+        final state exactly
+
+    Single-pass version (without live mutation) drifted on sg2 by dN +1
+    / dFree -1 / wall IOU 0.99; the cascade matters.
+    """
+    if not segments:
+        return []
+    n = len(segments)
+    segs_sim = [dict(s) for s in segments]
+    axes = [_axis_of(s) for s in segs_sim]
+    final_mutates: List[Tuple[int, str, float, float]] = []
+
+    for i in range(n):
+        if axes[i] not in ("h", "v"):
+            continue
+        my_axis = axes[i]
+        for end in ("1", "2"):
+            ex0 = float(segs_sim[i][f"x{end}"])
+            ey0 = float(segs_sim[i][f"y{end}"])
+            far_end = "2" if end == "1" else "1"
+            # legacy reads far_x / far_y once at the top of the (i, end)
+            # iteration -- it's the OTHER endpoint's coord, which this
+            # inner j-loop never mutates, so a single read is correct.
+            far_x = float(segs_sim[i][f"x{far_end}"])
+            far_y = float(segs_sim[i][f"y{far_end}"])
+            ex = ex0
+            ey = ey0
+            mutated = False
+            for j in range(n):
+                if j == i:
+                    continue
+                if axes[j] == my_axis or axes[j] not in ("h", "v"):
+                    continue
+                other = segs_sim[j]   # LIVE: reflects prior mutations
+                if axes[j] == "v":
+                    line_x = float(other["x1"])
+                    olo, ohi = sorted((float(other["y1"]),
+                                       float(other["y2"])))
+                    if not (abs(ex - line_x) <= tol and
+                            (olo - tol) <= ey <= (ohi + tol)):
+                        continue
+                    if (ex - line_x) * (far_x - line_x) >= 0:
+                        continue
+                    segs_sim[i][f"x{end}"] = line_x
+                    ex = line_x
+                    mutated = True
+                else:  # axes[j] == "h"
+                    line_y = float(other["y1"])
+                    olo, ohi = sorted((float(other["x1"]),
+                                       float(other["x2"])))
+                    if not (abs(ey - line_y) <= tol and
+                            (olo - tol) <= ex <= (ohi + tol)):
+                        continue
+                    if (ey - line_y) * (far_y - line_y) >= 0:
+                        continue
+                    segs_sim[i][f"y{end}"] = line_y
+                    ey = line_y
+                    mutated = True
+            if mutated and (abs(ex - ex0) > 1e-12 or
+                            abs(ey - ey0) > 1e-12):
+                final_mutates.append((i, end, ex, ey))
+
+    cands: List[C.Candidate] = []
+    for (i, end, new_x, new_y) in final_mutates:
+        cands.append(C.Candidate(
+            op="truncate",
+            add=[],
+            remove=[],
+            mutate=[(i, end, new_x, new_y)],
+            meta={"endpoint_key": (i, end)},
+        ))
+    return cands

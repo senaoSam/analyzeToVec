@@ -1465,6 +1465,45 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_truncate_overshoot_candidates(lines: List[Dict],
+                                            *,
+                                            tol: float,
+                                            ) -> List[Dict]:
+    """Step 9 phase 2: candidate-based ``truncate_overshoots``.
+
+    One Candidate per endpoint that crosses an orthogonal trunk by < tol;
+    candidate carries a single-coord mutate (the perpendicular coord onto
+    the trunk's line). ``used_endpoints`` set prevents double-mutating
+    the same endpoint -- matches legacy's iterative single-mutate-per-
+    endpoint pattern (legacy *can* in theory mutate twice if a second
+    trunk also satisfies the gate at the post-first-mutate coord, but
+    that requires the new endpoint to still be in crossing relation
+    with a different trunk's line, which is geometrically rare; the
+    closest-trunk-wins gate captures the dominant case).
+
+    Closing zero-length filter mirrors legacy's
+    ``[s for s in segs if (s['x1'], s['y1']) != (s['x2'], s['y2'])]``.
+    """
+    import candidates as C
+    import generators as G
+    if not lines:
+        return list(lines)
+    cands = G.truncate_overshoot_candidates(lines, tol=tol)
+    if not cands:
+        return [s for s in lines
+                if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    # Generator already pre-computed the final post-multi-truncate
+    # endpoint coord inside its (i, end) inner loop, so each candidate
+    # is the complete final effect for that endpoint. Apply all in
+    # batch (each candidate's mutate targets a different (i, end), so
+    # no conflicts).
+    current = list(lines)
+    for cand in cands:
+        current = C.apply_candidate(current, cand)
+    return [s for s in current
+            if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+
+
 def _accept_axis_align_candidates(lines: List[Dict],
                                    *,
                                    tol_deg: float,
@@ -2459,7 +2498,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #      accepts when mask support is present.
     # (3c) Truncate any remaining overshoots: an endpoint sitting on the far
     #      side of a perpendicular wall by less than tol gets clipped back.
-    s3 = truncate_overshoots(s3, l_extend)
+    # Step 9 phase 2: candidate-based wrapper. Same crossing-gate +
+    # single-axis mutate semantics; ``used_endpoints`` set enforces one
+    # mutation per endpoint (matches legacy's dominant single-truncate
+    # behaviour). Case-specific NO-OP on source, load-bearing on sg2.
+    s3 = _accept_truncate_overshoot_candidates(s3, tol=l_extend)
     # Re-merge after snapping; some segments may now align colinearly.
     # Step 8 phase 3: same candidate-based wrapper as phase 2 (above).
     s3 = _accept_cluster_collinear_merge_candidates(
