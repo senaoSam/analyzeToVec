@@ -1163,3 +1163,85 @@ def cluster_collinear_merge_candidates(segments: List[Dict],
         _process(idxs, "v", t)
 
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 9 phase 1: axis_align_candidates  (replaces axis_align_segments)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``axis_align_segments`` walks the segment list and, for each near-
+# axis segment (within ``tol_deg`` of an axis), snaps both endpoints onto
+# the axis by setting the line coord to the mean of both endpoints. Zero-
+# length segments are pruned.
+#
+# Each segment's transformation is independent of every other -- no
+# inter-segment dependency. So we emit:
+#   * a ``prune`` Candidate (remove=[i]) for each zero-length segment
+#   * an ``axis_align`` Candidate (mutate=[(i,"1",..),(i,"2",..)]) for each
+#     near-H segment with non-trivial drift (and likewise for near-V)
+#   * no candidate for segments that are already exactly axis-aligned or
+#     that fall outside the tol cone (diagonals): they pass through.
+#
+# The wrapper batches all candidates and applies them in one pass while
+# preserving legacy's input-order iteration (the per-seg dict rewrite means
+# order-of-application doesn't matter for the segment's content, but the
+# output list must still be in legacy order so downstream order-sensitive
+# passes see the same sequence).
+
+def axis_align_candidates(segments: List[Dict],
+                           tol_deg: float,
+                           ) -> List[C.Candidate]:
+    """Emit per-segment axis-snap candidates.
+
+    Mirrors ``vectorize.axis_align_segments`` exactly: prune zero-length
+    inputs; for each remaining segment whose angle is within ``tol_deg``
+    of an axis, snap onto that axis by averaging both endpoints' line
+    coord. Diagonals beyond the tol cone pass through with no candidate.
+    """
+    if not segments:
+        return []
+    rad = float(np.deg2rad(tol_deg))
+    cands: List[C.Candidate] = []
+    for i, seg in enumerate(segments):
+        x1 = float(seg["x1"]); y1 = float(seg["y1"])
+        x2 = float(seg["x2"]); y2 = float(seg["y2"])
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            # Legacy ``continue``s on zero-length: emit a prune candidate.
+            cands.append(C.Candidate(
+                op="prune",
+                add=[],
+                remove=[i],
+                mutate=[],
+                meta={"reason": "zero_length"},
+            ))
+            continue
+        ang = float(np.arctan2(dy, dx))
+        # Near-horizontal: snap y1, y2 -> mean
+        if abs(ang) < rad or abs(abs(ang) - np.pi) < rad:
+            ymid = 0.5 * (y1 + y2)
+            if abs(y1 - ymid) > 1e-12 or abs(y2 - ymid) > 1e-12:
+                cands.append(C.Candidate(
+                    op="axis_align",
+                    add=[],
+                    remove=[],
+                    mutate=[(i, "1", x1, ymid),
+                            (i, "2", x2, ymid)],
+                    meta={"axis": "h", "drift": max(abs(y1 - ymid),
+                                                    abs(y2 - ymid))},
+                ))
+        elif abs(abs(ang) - np.pi / 2) < rad:
+            xmid = 0.5 * (x1 + x2)
+            if abs(x1 - xmid) > 1e-12 or abs(x2 - xmid) > 1e-12:
+                cands.append(C.Candidate(
+                    op="axis_align",
+                    add=[],
+                    remove=[],
+                    mutate=[(i, "1", xmid, y1),
+                            (i, "2", xmid, y2)],
+                    meta={"axis": "v", "drift": max(abs(x1 - xmid),
+                                                    abs(x2 - xmid))},
+                ))
+        # else: diagonal beyond tol cone -- pass through, no candidate.
+    return cands

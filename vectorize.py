@@ -1465,6 +1465,55 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_axis_align_candidates(lines: List[Dict],
+                                   *,
+                                   tol_deg: float,
+                                   ) -> List[Dict]:
+    """Step 9 phase 1: candidate-based ``axis_align_segments``.
+
+    All candidates are independent per-segment mutations + zero-length
+    prunes; no inter-candidate dependency, so we apply them in one batch
+    while preserving legacy's input-order output (the segment list shape
+    must match legacy's to keep downstream order-sensitive passes
+    bit-identical -- ``snap_colinear`` / ``merge_collinear_1`` happen
+    immediately after this).
+
+    No score gate or loop: legacy is unconditional per-segment, and the
+    geometric gate (angle within tol_deg of an axis) is reproduced
+    exactly inside ``axis_align_candidates``.
+    """
+    import generators as G
+    if not lines:
+        return list(lines)
+    cands = G.axis_align_candidates(lines, tol_deg=tol_deg)
+    if not cands:
+        # Still must filter zero-length even when no rotation is needed
+        # (legacy's ``if dx == 0 and dy == 0: continue``). With no cands
+        # the only filter needed is the same zero-length check.
+        return [s for s in lines
+                if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    remove_set: set = set()
+    mutates_by_seg: Dict[int, List[Tuple[str, float, float]]] = {}
+    for cand in cands:
+        for ri in cand.remove:
+            remove_set.add(ri)
+        for (idx, end, x, y) in cand.mutate:
+            mutates_by_seg.setdefault(idx, []).append((end, x, y))
+    out: List[Dict] = []
+    for i, seg in enumerate(lines):
+        if i in remove_set:
+            continue
+        if i in mutates_by_seg:
+            ns = dict(seg)
+            for end, x, y in mutates_by_seg[i]:
+                ns["x" + end] = float(x)
+                ns["y" + end] = float(y)
+            out.append(ns)
+        else:
+            out.append(seg)
+    return out
+
+
 def _accept_cluster_collinear_merge_candidates(
         lines: List[Dict],
         *,
@@ -2369,7 +2418,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     _log("Geometric optimization (may take a while on large images)...")
     # --- Geometric optimization pipeline --------------------------------
     # (1) Force orthogonality (segments within ±5° of an axis become exactly H/V).
-    s1 = axis_align_segments(typed_segments, AXIS_SNAP_DEG)
+    # Step 9 phase 1: candidate-based axis-snap. Same per-segment angle
+    # gate as legacy; per-seg mutates are independent so we apply in batch
+    # while preserving input order for the downstream order-sensitive
+    # passes (snap_colinear / merge_collin_1 / t_junction_snap).
+    s1 = _accept_axis_align_candidates(typed_segments, tol_deg=AXIS_SNAP_DEG)
     # Tight wall-anchored coordinate cluster so colinear walls share an x or y,
     # without dragging genuinely-distinct walls together.
     # Step 7 phase 4: candidate-based wrapper around the same 1D cluster
