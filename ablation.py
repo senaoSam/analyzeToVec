@@ -51,10 +51,10 @@ PASSES: List[Tuple[str, str]] = [
     #     keep the legacy IDs so historical CSVs are still comparable.
     ("axis_align",            "axis_align_segments"),
     ("snap_colinear",         "_accept_fuse_candidates (step 7 phase 4)"),
-    ("merge_collin_1",        "merge_collinear (pre-T/L)"),
+    ("merge_collin_1",        "_accept_cluster_collinear_merge_candidates (step 8 phase 2)"),
     ("t_junction_snap",       "t_junction_snap"),
     ("truncate_overshoots",   "truncate_overshoots"),
-    ("merge_collin_2",        "merge_collinear (post T/L)"),
+    ("merge_collin_2",        "_accept_cluster_collinear_merge_candidates (step 8 phase 3)"),
     ("snap_endpoints_1",      "_accept_2d_cluster_candidates (step 7 phase 5)"),
     ("manhattan_force_axis",  "manhattan_force_axis"),
     ("canonical_line",        "canonicalize_offsets (step 4.9.2)"),
@@ -124,13 +124,17 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
         s = V._accept_fuse_candidates(s, fallback_tol=t["colinear"],
                                        masks=None)
     if disabled != "merge_collin_1":
-        s = V.merge_collinear(s, t["merge_perp"], t["merge_gap"])
+        # Step 8 phase 2: cluster-based candidate merge_collinear.
+        s = V._accept_cluster_collinear_merge_candidates(
+            s, perp_tol=t["merge_perp"], gap_tol=t["merge_gap"])
     if disabled != "t_junction_snap":
         s = V.t_junction_snap(s, t["t_snap"])
     if disabled != "truncate_overshoots":
         s = V.truncate_overshoots(s, t["l_extend"])
     if disabled != "merge_collin_2":
-        s = V.merge_collinear(s, t["merge_perp"], t["merge_gap"])
+        # Step 8 phase 3: same wrapper, second call site.
+        s = V._accept_cluster_collinear_merge_candidates(
+            s, perp_tol=t["merge_perp"], gap_tol=t["merge_gap"])
     if disabled != "snap_endpoints_1":
         # Step 7 phase 5: candidate-based 2D NetworkX-style cluster.
         s = V._accept_2d_cluster_candidates(s, tol=t["snap"])

@@ -549,99 +549,13 @@ def _classify_axis(seg: Dict) -> str:
     return "d"
 
 
-def merge_collinear(segments: List[Dict],
-                    perp_tol: float,
-                    gap_tol: float) -> List[Dict]:
-    """Within each (type, axis, shared-coordinate-band) group, fuse overlapping
-    or barely-separated segments into the longest covering segment.
-
-    Diagonals are passed through unchanged.
-    """
-    by_key: Dict[Tuple[str, str, int], List[int]] = defaultdict(list)
-    diagonals: List[Dict] = []
-
-    # First, bucket horizontals by (type, y-band) and verticals by (type, x-band).
-    # Band index = round(coord / perp_tol); we also check neighbours when merging
-    # to avoid edge-of-band misses.
-    horiz: Dict[str, List[int]] = defaultdict(list)
-    vert: Dict[str, List[int]] = defaultdict(list)
-    for i, seg in enumerate(segments):
-        axis = _classify_axis(seg)
-        if axis == "h":
-            horiz[seg["type"]].append(i)
-        elif axis == "v":
-            vert[seg["type"]].append(i)
-        else:
-            diagonals.append(seg)
-
-    out: List[Dict] = list(diagonals)
-
-    def _merge_group(indices: List[int], axis: str) -> List[Dict]:
-        """Greedy union-find over an axis-aligned same-type group."""
-        if not indices:
-            return []
-        # Build representation: (low, high, line_coord) per segment.
-        items = []
-        for i in indices:
-            seg = segments[i]
-            if axis == "h":
-                lo, hi = sorted((seg["x1"], seg["x2"]))
-                line = seg["y1"]
-            else:
-                lo, hi = sorted((seg["y1"], seg["y2"]))
-                line = seg["x1"]
-            items.append([lo, hi, line, seg["type"]])
-
-        # Cluster items by `line` within perp_tol — consider them colinear.
-        order = sorted(range(len(items)), key=lambda k: items[k][2])
-        clusters: List[List[int]] = []
-        for k in order:
-            if clusters and items[k][2] - items[clusters[-1][-1]][2] <= perp_tol:
-                clusters[-1].append(k)
-            else:
-                clusters.append([k])
-
-        merged: List[Dict] = []
-        for cluster in clusters:
-            # Sort by lo, then sweep merging when overlapping or within gap_tol.
-            cluster.sort(key=lambda k: items[k][0])
-            cur_lo, cur_hi, _, ctype = items[cluster[0]]
-            # Track each member as (line, length) so we can anchor the merged
-            # line to the longest contributor — long walls dominate jamb stubs.
-            cur_members = [(items[cluster[0]][2],
-                            items[cluster[0]][1] - items[cluster[0]][0])]
-            for k in cluster[1:]:
-                lo, hi, line, _ = items[k]
-                if lo - cur_hi <= gap_tol:
-                    cur_hi = max(cur_hi, hi)
-                    cur_members.append((line, hi - lo))
-                else:
-                    merged.append(_make_axis_seg(
-                        ctype, axis, cur_lo, cur_hi, _length_weighted(cur_members)))
-                    cur_lo, cur_hi = lo, hi
-                    cur_members = [(line, hi - lo)]
-            merged.append(_make_axis_seg(
-                ctype, axis, cur_lo, cur_hi, _length_weighted(cur_members)))
-        return merged
-
-    for t, idxs in horiz.items():
-        out.extend(_merge_group(idxs, "h"))
-    for t, idxs in vert.items():
-        out.extend(_merge_group(idxs, "v"))
-    return out
-
-
-def _make_axis_seg(t: str, axis: str, lo: float, hi: float, line: float) -> Dict:
-    if axis == "h":
-        return {"type": t, "x1": lo, "y1": line, "x2": hi, "y2": line}
-    return {"type": t, "x1": line, "y1": lo, "x2": line, "y2": hi}
-
-
-def _length_weighted(members: List[Tuple[float, float]]) -> float:
-    """Pick the line coordinate as a length-weighted mean, so the longest
-    contributing segment dominates and short stubs can't drag a wall off-axis."""
-    total_w = sum(max(w, 1e-6) for _, w in members)
-    return sum(line * max(w, 1e-6) for line, w in members) / total_w
+# Legacy ``merge_collinear`` + ``_make_axis_seg`` + ``_length_weighted`` were
+# deleted in step 8 phase 4 (dead code after phases 2/3 migrated both call
+# sites to ``_accept_cluster_collinear_merge_candidates``). The cluster
+# generator in ``generators.py`` reproduces the partition exactly, and the
+# accompanying wrapper assembles output in legacy's iteration order so
+# downstream order-sensitive passes (``t_junction_snap`` etc) see identical
+# input.
 
 
 # ---------------------------------------------------------------------------
@@ -1011,112 +925,9 @@ def manhattan_intersection_snap(segments: List[Dict], tol: float,
 # with thickness-aware masks).
 
 
-def manhattan_ultimate_merge(segments: List[Dict]) -> List[Dict]:
-    """Step 4: union same-type segments that lie on the exact same line and
-    whose extents touch or overlap — fuse into the smallest set of longest
-    spans, **but only when doing so does not destroy a T-junction**.
-
-    Junction-aware merge rule:
-      Two same-type collinear spans A=[lo_a, hi_a] and B=[lo_b, hi_b]
-      (with hi_a ≥ lo_b after sorting) are merged unless the would-be
-      interior coordinate is also an endpoint of any segment outside this
-      bucket (a different-axis or different-type segment that terminates
-      there). If that other segment exists, merging the two pieces would
-      collapse the touch point from an explicit node into a body interior,
-      and the foreign segment would become a "deferred T-junction"
-      (degree-1 endpoint sitting on a body) instead of a real degree-3
-      junction. Keeping the two pieces separate preserves the explicit
-      junction in the node graph.
-
-    For the canonical case our pipeline produces — Manhattan-routed
-    geometry where line coordinates come from a single canonical source —
-    the floats compare exact-equal, so endpoint-coordinate matching is
-    safe. (We still apply a coarse 0.01-px quantisation for robustness
-    against any future caller passing through ordinary float arithmetic.)
-    """
-    # Bucket horizontals by (type, y), verticals by (type, x).
-    h_buckets: Dict[Tuple[str, float], List[Tuple[float, float]]] = defaultdict(list)
-    v_buckets: Dict[Tuple[str, float], List[Tuple[float, float]]] = defaultdict(list)
-    for s in segments:
-        ax = _seg_axis_strict(s)
-        if ax == "h":
-            lo, hi = sorted((s["x1"], s["x2"]))
-            h_buckets[(s["type"], s["y1"])].append((lo, hi))
-        elif ax == "v":
-            lo, hi = sorted((s["y1"], s["y2"]))
-            v_buckets[(s["type"], s["x1"])].append((lo, hi))
-
-    # Endpoint occurrence counter across the whole input — used to detect
-    # when a span boundary is also touched by an external segment.
-    endpoint_count: Dict[Tuple[int, int], int] = defaultdict(int)
-    _Q = 100  # 0.01-px quantisation grid
-
-    def _qk(x: float, y: float) -> Tuple[int, int]:
-        return (int(round(x * _Q)), int(round(y * _Q)))
-
-    for s in segments:
-        endpoint_count[_qk(s["x1"], s["y1"])] += 1
-        endpoint_count[_qk(s["x2"], s["y2"])] += 1
-
-    def _is_external(point: float, axis_value: float, axis_kind: str,
-                     own_contribution: int) -> bool:
-        """True iff the endpoint at (point, axis_value) for H (or
-        (axis_value, point) for V) is shared with at least one segment
-        outside the bucket currently being merged. ``own_contribution``
-        is the number of bucket-internal endpoints we know are at this
-        coordinate (1 for one-sided overlap, 2 for an exact touch).
-        """
-        if axis_kind == "h":
-            k = _qk(point, axis_value)
-        else:
-            k = _qk(axis_value, point)
-        return endpoint_count.get(k, 0) > own_contribution
-
-    def _union_junction_aware(spans: List[Tuple[float, float]],
-                               axis_value: float, axis_kind: str
-                               ) -> List[Tuple[float, float]]:
-        if not spans:
-            return []
-        spans = sorted(spans)
-        merged = [spans[0]]
-        for lo, hi in spans[1:]:
-            cur_lo, cur_hi = merged[-1]
-            if lo > cur_hi:
-                merged.append((lo, hi))
-                continue
-            # Spans overlap or touch — decide merge.
-            block = False
-            if abs(lo - cur_hi) < 1e-6:
-                # Exact touch at point cur_hi. Two bucket-internal endpoints
-                # contribute (cur's hi and new's lo) → own_contribution=2.
-                if _is_external(cur_hi, axis_value, axis_kind, 2):
-                    block = True
-            else:
-                # Overlap: cur_hi (cur's hi) and lo (new's lo) are at
-                # different coords. Each gets one bucket-internal
-                # endpoint contribution. If either coincides with an
-                # external endpoint, merging would absorb that junction
-                # into a body interior.
-                if _is_external(cur_hi, axis_value, axis_kind, 1):
-                    block = True
-                elif _is_external(lo, axis_value, axis_kind, 1):
-                    block = True
-            if block:
-                merged.append((lo, hi))
-            else:
-                merged[-1] = (cur_lo, max(cur_hi, hi))
-        return merged
-
-    out: List[Dict] = []
-    for (t, y), spans in h_buckets.items():
-        for lo, hi in _union_junction_aware(spans, y, "h"):
-            if hi > lo:
-                out.append({"type": t, "x1": lo, "y1": y, "x2": hi, "y2": y})
-    for (t, x), spans in v_buckets.items():
-        for lo, hi in _union_junction_aware(spans, x, "v"):
-            if hi > lo:
-                out.append({"type": t, "x1": x, "y1": lo, "x2": x, "y2": hi})
-    return out
+# Legacy ``manhattan_ultimate_merge`` was deleted in step 8 phase 4 (dead
+# code after step 6 phase 1 migrated its single call site to
+# ``_accept_merge_candidates(perp_tol=0, gap_tol=0, junction_aware=True)``).
 
 
 # ---------------------------------------------------------------------------
@@ -1136,87 +947,9 @@ def manhattan_ultimate_merge(segments: List[Dict]) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 
-def cluster_parallel_duplicates(segments: List[Dict],
-                                perp_tol: float) -> List[Dict]:
-    """Per (type, axis) bucket: cluster segments whose line coordinates are
-    within perp_tol AND whose along-axis extents overlap. Each cluster
-    becomes one centred line spanning the union of extents.
-
-    Length-weighted line coordinate: a long wall dominates a stub so a
-    real long wall doesn't get nudged off-axis by a short skeleton fragment.
-    """
-    by_axis_type: Dict[Tuple[str, str], List[int]] = defaultdict(list)
-    for i, s in enumerate(segments):
-        by_axis_type[(_seg_axis_strict(s), s["type"])].append(i)
-
-    out: List[Dict] = []
-    for (axis, t), idxs in by_axis_type.items():
-        items: List[Dict] = []
-        for i in idxs:
-            s = segments[i]
-            if axis == "h":
-                lo, hi = sorted((s["x1"], s["x2"]))
-                line = s["y1"]
-            else:
-                lo, hi = sorted((s["y1"], s["y2"]))
-                line = s["x1"]
-            items.append({"lo": lo, "hi": hi, "line": line, "len": hi - lo})
-
-        # Build undirected graph linking segment pairs that should be merged.
-        # Two distinct cases must both be handled here:
-        #
-        #  (1) Near-collinear touching pieces. Same axis, tiny perpendicular
-        #      separation (a few pixels), ranges touch or overlap a little.
-        #      These are typically a single wall that the skeleton broke
-        #      into two pieces. Merge tolerance for this is small (~5 px).
-        #
-        #  (2) Thick-wall duplicate centerlines. A genuinely thick wall whose
-        #      mask skeletonized into two parallel ridges. Same axis, ranges
-        #      overlap substantially (>50% of the shorter), perp distance up
-        #      to perp_tol.
-        #
-        # A simple touch-merge with the full perp_tol would mis-fuse L-corners
-        # (one long wall touching a short perpendicular stub at the corner).
-        # Splitting the criterion as above keeps L-corners intact while still
-        # absorbing thick-wall duplicates.
-        TOUCH_PERP_TOL = 12.0
-        g = nx.Graph()
-        for k in range(len(items)):
-            g.add_node(k)
-        for i in range(len(items)):
-            for j in range(i + 1, len(items)):
-                a, b = items[i], items[j]
-                dline = abs(a["line"] - b["line"])
-                if dline > perp_tol:
-                    continue
-                ov_lo = max(a["lo"], b["lo"])
-                ov_hi = min(a["hi"], b["hi"])
-                overlap = ov_hi - ov_lo
-                shorter = min(a["len"], b["len"])
-                if shorter <= 0:
-                    continue
-                # Case (1): near-collinear, ranges touch or overlap a bit.
-                if dline <= TOUCH_PERP_TOL and overlap >= -1e-6:
-                    g.add_edge(i, j)
-                    continue
-                # Case (2): thick-wall duplicate, requires real overlap.
-                if overlap >= 0.5 * shorter and overlap > 0:
-                    g.add_edge(i, j)
-
-        for comp in nx.connected_components(g):
-            comp = list(comp)
-            members = [items[k] for k in comp]
-            total_w = sum(max(m["len"], 1e-6) for m in members)
-            line = sum(m["line"] * max(m["len"], 1e-6) for m in members) / total_w
-            lo = min(m["lo"] for m in members)
-            hi = max(m["hi"] for m in members)
-            if hi <= lo:
-                continue
-            if axis == "h":
-                out.append({"type": t, "x1": lo, "y1": line, "x2": hi, "y2": line})
-            else:
-                out.append({"type": t, "x1": line, "y1": lo, "x2": line, "y2": hi})
-    return out
+# Legacy ``cluster_parallel_duplicates`` was deleted in step 8 phase 4 (dead
+# code after step 6 phase 3 migrated its single call site to
+# ``_accept_parallel_merge_candidates`` with ``skip_score=True``).
 
 
 # Legacy ``grid_snap_endpoints`` was deleted in step 7 phase 6 (dead code
