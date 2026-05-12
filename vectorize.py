@@ -27,7 +27,7 @@ import networkx as nx
 import numpy as np
 from skimage.morphology import skeletonize
 
-from canonical_line import canonicalize_offsets, compute_local_thickness
+from canonical_line import compute_local_thickness
 
 # Segment fields that are pipeline-internal — computed and used inside
 # vectorize_bgr but stripped before the result leaves this module. Keeps
@@ -504,31 +504,8 @@ def branches_to_segments(branches: List[List[Tuple[int, int]]]) -> List[Tuple[fl
 # Step 4b: axis alignment (kill chamfered corners on orthogonal floorplans)
 # ---------------------------------------------------------------------------
 
-def axis_align_segments(segments: List[Dict], tol_deg: float) -> List[Dict]:
-    """Force near-horizontal/vertical segments to be exactly axis-aligned.
-
-    For a near-horizontal segment we set both endpoints' y to the average y;
-    for near-vertical we average x. Diagonals further from an axis than
-    tol_deg are left untouched.
-    """
-    rad = np.deg2rad(tol_deg)
-    out = []
-    for seg in segments:
-        x1, y1, x2, y2 = seg["x1"], seg["y1"], seg["x2"], seg["y2"]
-        dx, dy = x2 - x1, y2 - y1
-        if dx == 0 and dy == 0:
-            continue
-        ang = np.arctan2(dy, dx)  # -pi..pi
-        # Angle to nearest axis.
-        # near horizontal: |ang| < rad or |ang - pi| < rad
-        if abs(ang) < rad or abs(abs(ang) - np.pi) < rad:
-            ymid = 0.5 * (y1 + y2)
-            seg = {**seg, "y1": ymid, "y2": ymid}
-        elif abs(abs(ang) - np.pi / 2) < rad:
-            xmid = 0.5 * (x1 + x2)
-            seg = {**seg, "x1": xmid, "x2": xmid}
-        out.append(seg)
-    return out
+# Legacy ``axis_align_segments`` was deleted in step 9 phase 4 (dead code
+# after phase 1 migrated its call site to ``_accept_axis_align_candidates``).
 
 
 # Legacy ``snap_colinear_coords`` was deleted in step 7 phase 6 (dead code
@@ -625,56 +602,9 @@ def t_junction_snap(segments: List[Dict], tol: float) -> List[Dict]:
 
 
 
-def truncate_overshoots(segments: List[Dict], tol: float) -> List[Dict]:
-    """After all snapping, scan each axis-aligned segment for endpoints that
-    project past an orthogonal segment that would clearly serve as the corner.
-
-    This handles the case where a long horizontal wall extends a few pixels
-    past the vertical wall it should terminate against, leaving a visible
-    protrusion. We pull the offending endpoint back to the intersection.
-    """
-    segs = [dict(s) for s in segments]
-    axis = [_classify_axis(s) for s in segs]
-    n = len(segs)
-
-    for i in range(n):
-        if axis[i] == "d":
-            continue
-        for end in ("1", "2"):
-            ex_key, ey_key = f"x{end}", f"y{end}"
-            ex, ey = segs[i][ex_key], segs[i][ey_key]
-            for j in range(n):
-                if i == j or axis[j] == "d" or axis[j] == axis[i]:
-                    continue
-                other = segs[j]
-                if axis[j] == "v":
-                    line_x = other["x1"]
-                    olo, ohi = sorted((other["y1"], other["y2"]))
-                    # Endpoint of `i` (horizontal) overshoots if its endpoint
-                    # is on the wrong side of the vertical and within tol of it,
-                    # while the vertical's body covers the horizontal's y.
-                    if abs(ex - line_x) <= tol and (olo - tol) <= ey <= (ohi + tol):
-                        # Determine which side the rest of segment i lies on.
-                        far_x = segs[i]["x1"] if end == "2" else segs[i]["x2"]
-                        if (ex - line_x) * (far_x - line_x) < 0:
-                            # endpoint is on the opposite side to the body's bulk:
-                            # truncate the endpoint back to the intersection.
-                            segs[i][ex_key] = line_x
-                            segs[i][ey_key] = other["y1"] if abs(ey - other["y1"]) < abs(ey - other["y2"]) else ey
-                            # Y stays on segment i's own line — i is horizontal,
-                            # so its y is invariant. Reset to original line value:
-                            segs[i][ey_key] = ey
-                            ex = line_x
-                else:  # axis[j] == "h"
-                    line_y = other["y1"]
-                    olo, ohi = sorted((other["x1"], other["x2"]))
-                    if abs(ey - line_y) <= tol and (olo - tol) <= ex <= (ohi + tol):
-                        far_y = segs[i]["y1"] if end == "2" else segs[i]["y2"]
-                        if (ey - line_y) * (far_y - line_y) < 0:
-                            segs[i][ey_key] = line_y
-                            ey = line_y
-
-    return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+# Legacy ``truncate_overshoots`` was deleted in step 9 phase 4 (dead code
+# after phase 2 migrated its call site to
+# ``_accept_truncate_overshoot_candidates``).
 
 
 # ---------------------------------------------------------------------------

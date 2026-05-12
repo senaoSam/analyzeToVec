@@ -49,15 +49,15 @@ PASSES: List[Tuple[str, str]] = [
     #     manhattan_t_project / grid_snap_2 -> t_project_candidates,
     #     fuse_close_endpoints -> endpoint_fuse_candidates. Ablation labels
     #     keep the legacy IDs so historical CSVs are still comparable.
-    ("axis_align",            "axis_align_segments"),
+    ("axis_align",            "_accept_axis_align_candidates (step 9 phase 1)"),
     ("snap_colinear",         "_accept_fuse_candidates (step 7 phase 4)"),
     ("merge_collin_1",        "_accept_cluster_collinear_merge_candidates (step 8 phase 2)"),
     ("t_junction_snap",       "t_junction_snap"),
-    ("truncate_overshoots",   "truncate_overshoots"),
+    ("truncate_overshoots",   "_accept_truncate_overshoot_candidates (step 9 phase 2)"),
     ("merge_collin_2",        "_accept_cluster_collinear_merge_candidates (step 8 phase 3)"),
     ("snap_endpoints_1",      "_accept_2d_cluster_candidates (step 7 phase 5)"),
     ("manhattan_force_axis",  "manhattan_force_axis"),
-    ("canonical_line",        "canonicalize_offsets (step 4.9.2)"),
+    ("canonical_line",        "_accept_canonicalize_offset_candidates (step 9 phase 3)"),
     ("manhattan_t_project",   "_accept_t_project_candidates (step 7 phase 2)"),
     ("cluster_parallel",      "_accept_parallel_merge_candidates (step 6 phase 3)"),
     ("grid_snap_2",           "_accept_t_project_candidates (step 7 phase 3)"),
@@ -118,7 +118,8 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
 
     # Mirror of current vectorize_bgr's geometric-optimisation pipeline.
     if disabled != "axis_align":
-        s = V.axis_align_segments(s, V.AXIS_SNAP_DEG)
+        # Step 9 phase 1: candidate-based axis snap.
+        s = V._accept_axis_align_candidates(s, tol_deg=V.AXIS_SNAP_DEG)
     if disabled != "snap_colinear":
         # Step 7 phase 4: candidate-based 1D fuse (fixed colinear_tol).
         s = V._accept_fuse_candidates(s, fallback_tol=t["colinear"],
@@ -130,7 +131,8 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
     if disabled != "t_junction_snap":
         s = V.t_junction_snap(s, t["t_snap"])
     if disabled != "truncate_overshoots":
-        s = V.truncate_overshoots(s, t["l_extend"])
+        # Step 9 phase 2: candidate-based truncate.
+        s = V._accept_truncate_overshoot_candidates(s, tol=t["l_extend"])
     if disabled != "merge_collin_2":
         # Step 8 phase 3: same wrapper, second call site.
         s = V._accept_cluster_collinear_merge_candidates(
@@ -141,8 +143,9 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
     if disabled != "manhattan_force_axis":
         s = V.manhattan_force_axis(s)
     if disabled != "canonical_line":
-        s = V.canonicalize_offsets(s, wall_mask=masks.get("wall"),
-                                   attach_thickness=True)
+        # Step 9 phase 3: candidate-based offset canonicalization.
+        s = V._accept_canonicalize_offset_candidates(
+            s, wall_mask=masks.get("wall"), attach_thickness=True)
     # manhattan_intersection_snap call removed step 4.9.7 (pure NO-OP)
     if disabled != "manhattan_t_project":
         # Step 7 phase 2: candidate-based thickness-aware T-project.
