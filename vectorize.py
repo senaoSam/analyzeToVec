@@ -2675,7 +2675,9 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #      side of a perpendicular wall by less than tol gets clipped back.
     s3 = truncate_overshoots(s3, l_extend)
     # Re-merge after snapping; some segments may now align colinearly.
-    s3 = merge_collinear(s3, merge_perp, merge_gap)
+    # Step 8 phase 3: same candidate-based wrapper as phase 2 (above).
+    s3 = _accept_cluster_collinear_merge_candidates(
+        s3, perp_tol=merge_perp, gap_tol=merge_gap)
 
     # Wall-priority NetworkX node merge.
     # Step 7 phase 5: candidate-based wrapper around the 2D circular-tol
