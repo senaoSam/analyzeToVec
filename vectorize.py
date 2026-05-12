@@ -2560,6 +2560,15 @@ def vectorize_bgr(bgr: np.ndarray, *,
 
     _log("Color segmentation...")
     masks = segment_colors(bgr)
+    # Step 13: also compute the continuous wall-evidence map and thread it
+    # to score-using wrappers. segment_colors internally calls
+    # compute_wall_evidence then thresholds at 0.5 for the binary mask;
+    # we recompute it here once to get the raw continuous map (millisecond
+    # cost on the regression images). With continuous evidence flowing,
+    # ``wall_evidence_integral`` and ``phantom_penalty`` see D3-only
+    # edge-supported pixels at their true 0.4 weight instead of the
+    # 0/1 binary collapse.
+    wall_evidence_map = compute_wall_evidence(bgr)
 
     typed_segments: List[Dict] = []
     branch_stats = {}
@@ -2728,7 +2737,7 @@ def vectorize_bgr(bgr: np.ndarray, *,
         s6,
         perp_tol=parallel_merge,
         skip_score=True,
-        wall_evidence=None,
+        wall_evidence=wall_evidence_map,
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
         wall_mask=masks.get("wall"),
@@ -2820,7 +2829,7 @@ def vectorize_bgr(bgr: np.ndarray, *,
         snapped,
         max_radius=l_ext_asym,
         wall_mask=masks.get("wall"),
-        wall_evidence=None,  # falls back to (wall_mask>0) as float32
+        wall_evidence=wall_evidence_map,  # step 13: continuous evidence
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
         audit_recorder=audit_recorder,
@@ -2841,7 +2850,7 @@ def vectorize_bgr(bgr: np.ndarray, *,
         snapped,
         fallback_tol=ray_fuse,
         masks=masks,
-        wall_evidence=None,
+        wall_evidence=wall_evidence_map,  # step 13: continuous evidence
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
         audit_recorder=audit_recorder,
@@ -2865,7 +2874,17 @@ def vectorize_bgr(bgr: np.ndarray, *,
         perp_tol=0.0,
         gap_tol=0.0,
         junction_aware=True,
-        wall_evidence=None,  # binary wall mask used as evidence by score
+        # NOTE: keeps wall_evidence=None (binary fallback) on purpose --
+        # this wrapper uses the strict ``delta >= 0`` rule for touching-
+        # collinear merges, and continuous evidence introduces sub-ULP
+        # numerical drift in ``wall_evidence_integral`` that flips some
+        # zero-delta merges to slightly-negative, rejecting clean JSON
+        # simplifications (verified: with continuous evidence source goes
+        # 102 -> 113 segs and sg2 124 -> 127, all IOUs 1.0000 -- rendering
+        # bit-identical but baseline hash diverges). Other score-using
+        # wrappers above keep continuous evidence (they use the strict
+        # ``delta > 0`` rule, no zero-delta ambiguity).
+        wall_evidence=None,
         door_mask=masks.get("door"),
         window_mask=masks.get("window"),
         wall_mask=masks.get("wall"),  # step 11: thick-wall-aware junction
