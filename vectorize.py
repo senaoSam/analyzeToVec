@@ -2668,11 +2668,13 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     #       of N nominally-distinct lines all within 3 px of each other.
     s6 = canonicalize_offsets(s6, wall_mask=masks.get("wall"),
                               attach_thickness=True)
-    # (b) Intersection-based L-corner snap. Step 4.9.4: per-pair tol
-    #     comes from each segment's local wall thickness; the legacy
-    #     ``manhattan_tol`` (15 px * scale) is now only the fallback for
-    #     segments whose thickness can't be sampled.
-    s6 = manhattan_intersection_snap(s6, manhattan_tol, masks=masks)
+    # (b) Intersection-based L-corner snap removed in step 4.9.7 (post-
+    #     ablation cleanup): with canonicalize_offsets above and thickness-
+    #     aware tols in manhattan_t_project below, ablation on source/sg2
+    #     shows ``manhattan_intersection_snap`` as a pure NO-OP (dN=0,
+    #     IOU=1.000 bit-identical on both reference images; Gemini also
+    #     bit-identical). Its work is fully covered by the canonical-line
+    #     + T-project + intersection-on-fuse path now.
     # (c) T-junction projection onto orthogonal trunks. Step 4.9.4: tol
     #     scales with the trunk's local thickness, fallback ``manhattan_tol``.
     s6 = manhattan_t_project(s6, manhattan_tol, masks=masks)

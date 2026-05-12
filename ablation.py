@@ -35,14 +35,12 @@ REF_IMAGES = [
 
 
 PASSES: List[Tuple[str, str]] = [
-    # (id, human-readable description). Matches the current vectorize_bgr
-    # geometric-optimisation pipeline (step 4.8 state). Passes removed by
-    # the refactor (force_l_corner_closure, force_close_free_l_corners,
-    # final_polish_short_tails, extend_trunk_to_loose, mask_gated_l_extend,
-    # extend_to_intersect, prune_tails, plus the manhattan_merge_1 /
-    # snap_endpoints_2 / grid_snap_1 / force_close_free_l_2 duplicate
-    # calls) are no longer represented; the proximal_bridge_generator
-    # added in step 4.7 is also not ablation-tested yet.
+    # (id, human-readable description). Mirrors the current vectorize_bgr
+    # geometric-optimisation pipeline (step 4.9.6 state). Two former
+    # ``manhattan_ultimate_merge`` calls (post-watertight, post-gap-close)
+    # were removed in step 4.8 after ablation showed them NO-OP across all
+    # 3 reference images. ``canonical_line`` (step 4.9.2) and
+    # ``proximal_bridge`` (step 4.7) are now ablation-testable.
     ("axis_align",            "axis_align_segments"),
     ("snap_colinear",         "snap_colinear_coords"),
     ("merge_collin_1",        "merge_collinear (pre-T/L)"),
@@ -51,15 +49,15 @@ PASSES: List[Tuple[str, str]] = [
     ("merge_collin_2",        "merge_collinear (post T/L)"),
     ("snap_endpoints_1",      "snap_endpoints"),
     ("manhattan_force_axis",  "manhattan_force_axis"),
+    ("canonical_line",        "canonicalize_offsets (step 4.9.2)"),
     ("manhattan_isect_snap",  "manhattan_intersection_snap"),
     ("manhattan_t_project",   "manhattan_t_project"),
     ("cluster_parallel",      "cluster_parallel_duplicates"),
     ("grid_snap_2",           "grid_snap_endpoints"),
-    ("manhattan_merge_2",     "manhattan_ultimate_merge (post-watertight)"),
     ("t_snap_with_extension", "t_snap_with_extension (candidate)"),
-    ("manhattan_merge_3",     "manhattan_ultimate_merge (post-gap-closing)"),
     ("brute_force_ray",       "brute_force_ray_extend (candidate)"),
     ("insert_connectors",     "insert_missing_connectors (candidate)"),
+    ("proximal_bridge",       "_accept_bridge_candidates (step 4.7)"),
     ("fuse_close_endpoints",  "fuse_close_endpoints"),
     ("manhattan_merge_4",     "manhattan_ultimate_merge (final)"),
 ]
@@ -128,20 +126,19 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
         s = V.snap_endpoints(s, t["snap"])
     if disabled != "manhattan_force_axis":
         s = V.manhattan_force_axis(s)
+    if disabled != "canonical_line":
+        s = V.canonicalize_offsets(s, wall_mask=masks.get("wall"),
+                                   attach_thickness=True)
     if disabled != "manhattan_isect_snap":
-        s = V.manhattan_intersection_snap(s, t["manhattan"])
+        s = V.manhattan_intersection_snap(s, t["manhattan"], masks=masks)
     if disabled != "manhattan_t_project":
-        s = V.manhattan_t_project(s, t["manhattan"])
+        s = V.manhattan_t_project(s, t["manhattan"], masks=masks)
     if disabled != "cluster_parallel":
         s = V.cluster_parallel_duplicates(s, t["parallel_merge"])
     if disabled != "grid_snap_2":
         s = V.grid_snap_endpoints(s, t["grid_snap"])
-    if disabled != "manhattan_merge_2":
-        s = V.manhattan_ultimate_merge(s)
     if disabled != "t_snap_with_extension":
         s = V.t_snap_with_extension(s, t["gap_close"], masks=masks)
-    if disabled != "manhattan_merge_3":
-        s = V.manhattan_ultimate_merge(s)
     if disabled != "brute_force_ray":
         V.brute_force_ray_extend(s, t["ray_ext"], V.RAY_EXT_LOOSE_PX)
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
@@ -149,21 +146,24 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
         V.insert_missing_connectors(s, t["colinear_loose"], t["connector_max"],
                                     wall_mask=masks.get("wall"))
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
-    # NOTE: proximal_bridge_generator (added step 4.7) is not yet ablation-
-    # tested. To test it, callers can wire ``_accept_bridge_candidates``
-    # behind another ``if disabled != "proximal_bridge":`` guard.
-    s = V._accept_bridge_candidates(s,
-                                     max_radius=t["l_ext_asym"],
-                                     wall_mask=masks.get("wall"),
-                                     wall_evidence=None,
-                                     door_mask=masks.get("door"),
-                                     window_mask=masks.get("window"))
+    if disabled != "proximal_bridge":
+        s = V._accept_bridge_candidates(s,
+                                         max_radius=t["l_ext_asym"],
+                                         wall_mask=masks.get("wall"),
+                                         wall_evidence=None,
+                                         door_mask=masks.get("door"),
+                                         window_mask=masks.get("window"))
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
     if disabled != "fuse_close_endpoints":
-        V.fuse_close_endpoints(s, t["ray_fuse"])
+        V.fuse_close_endpoints(s, t["ray_fuse"], masks=masks)
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
     if disabled != "manhattan_merge_4":
         s = V.manhattan_ultimate_merge(s)
+    # Strip pipeline-internal fields so segments serialise back to canonical
+    # {type, x1, y1, x2, y2} like vectorize_bgr's tail does.
+    for seg in s:
+        for k in V._INTERNAL_SEG_FIELDS:
+            seg.pop(k, None)
     return s, masks
 
 
