@@ -6,20 +6,20 @@
     895,
     1200
   ],
-  "hash": "ef74a320b396ef46fb97679568d5953f287de3b9",
+  "hash": "58837a32206ec4849d7e35263e625d9b7ea25e2b",
   "graph": {
     "num_segments": 102,
     "count_by_type": {
+      "wall": 71,
       "window": 16,
-      "door": 15,
-      "wall": 71
+      "door": 15
     },
     "free_endpoints": 12,
     "num_short_segments": 0,
     "total_length_by_type": {
+      "wall": 5690.0,
       "window": 1398.0,
-      "door": 1031.0,
-      "wall": 5690.0
+      "door": 1031.0
     }
   },
   "thickness_px": {
@@ -44,6 +44,6 @@
       "loose": "door_loose.png"
     }
   },
-  "baseline_updated_at": "2026-05-12T14:38:29",
+  "baseline_updated_at": "2026-05-12T18:10:32",
   "baseline_updated_by": "manual_yes_flag"
 }

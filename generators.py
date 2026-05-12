@@ -1675,10 +1675,33 @@ def t_junction_snap_candidates(segments: List[Dict],
                     best_d = d
                     best = (sx, sy)
             if best is not None:
-                segs_sim[i][ex_key] = best[0]
-                segs_sim[i][ey_key] = best[1]
-                if abs(best[0] - ex0) > 1e-12 or abs(best[1] - ey0) > 1e-12:
-                    final_mutates.append((i, end, best[0], best[1]))
+                # Preserve-short-segment guard: if snapping this endpoint
+                # to ``best`` would collapse the segment to zero length
+                # AND the segment is short enough to plausibly be a
+                # column-protrusion stub or partition tail, skip the
+                # mutation. Without this guard, short stubs adjacent to
+                # long trunks have both endpoints snapped onto the
+                # trunk's line and vanish (observed on source.png at
+                # several wall thickenings -- the user's "missing
+                # walls" spots). The length threshold keeps the guard
+                # from interfering with normal snaps on regular-length
+                # segments where the collapse case is unlikely to be a
+                # real feature.
+                other_end = "2" if end == "1" else "1"
+                other_x = segs_sim[i][f"x{other_end}"]
+                other_y = segs_sim[i][f"y{other_end}"]
+                collapse = (abs(best[0] - other_x) < 1e-9
+                            and abs(best[1] - other_y) < 1e-9)
+                seg_len = float(np.hypot(other_x - ex0, other_y - ey0))
+                # Only protect SHORT segments (< 2 * tol). Longer
+                # segments that collapse usually represent legacy's
+                # intended cleanup behaviour, so we leave them alone.
+                preserve = collapse and seg_len < 2.0 * tol
+                if not preserve:
+                    segs_sim[i][ex_key] = best[0]
+                    segs_sim[i][ey_key] = best[1]
+                    if abs(best[0] - ex0) > 1e-12 or abs(best[1] - ey0) > 1e-12:
+                        final_mutates.append((i, end, best[0], best[1]))
 
     cands: List[C.Candidate] = []
     for (i, end, new_x, new_y) in final_mutates:
