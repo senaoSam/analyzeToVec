@@ -880,3 +880,122 @@ def t_project_candidates(segments: List[Dict],
             ))
 
     return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 7 phase 5: endpoint_cluster_2d_candidates  (replaces snap_endpoints)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``snap_endpoints`` builds a graph where every endpoint is a node and
+# an edge joins two nodes within Euclidean distance ``tol`` (2D circular tol,
+# *not* rectangular). Connected components are then rewritten: every member
+# endpoint moves to the component's wall-priority anchor mean.
+#
+# This is fundamentally different from ``endpoint_fuse_candidates``'s 1D
+# rectangular-tol clustering: in 2D, ``dist=sqrt(dx^2 + dy^2) <= tol`` is
+# strictly tighter than ``|dx| <= tol AND |dy| <= tol`` -- two endpoints at
+# (0, 0) and (4, 4) have 2D dist 5.66 but 1D max dist 4. With tol=5, the 1D
+# version would fuse them, the 2D version wouldn't. Phase 5 attempt 1 tried
+# reusing the 1D fuse and failed regression hard (wall IOU drop ~18 % on
+# both source and sg2) because pre-canonical chromatic endpoints near walls
+# get incorrectly pulled across corners by the 1D tol.
+#
+# The generator emits one Candidate per non-singleton connected component;
+# each candidate is a mutate-only batch that moves every component member
+# to the canonical (anchor mean rounded to 4 decimals). Legacy rounds *every*
+# output endpoint to 4 decimals including singletons -- handled outside the
+# generator by the accept-loop wrapper.
+
+def endpoint_cluster_2d_candidates(segments: List[Dict],
+                                    tol: float,
+                                    ) -> List[C.Candidate]:
+    """Build a 2D-circular-tol endpoint cluster graph and emit one candidate
+    per non-singleton component.
+
+    Mirrors ``vectorize.snap_endpoints`` exactly:
+      * graph nodes = (seg_idx, end), in iteration order so node indices
+        match legacy ``k_a = 2*i``, ``k_b = 2*i + 1``
+      * edges = pairs within Euclidean tol (O(N^2); fine for N <= 250)
+      * for each component, anchor = top-priority members' coord mean,
+        non-anchor members snap toward the anchor mean
+      * canonical coords rounded to 4 decimals at candidate-build time so
+        ``apply_candidate`` writes the same rounded values legacy writes
+
+    The candidate's ``meta["component_size"]`` lets the accept loop sort
+    by largest cluster first (bigger fuses earlier = fewer late-stage
+    micro-adjustments).
+    """
+    if not segments:
+        return []
+
+    pts: List[Tuple[int, str, float, float]] = []
+    for i, s in enumerate(segments):
+        pts.append((i, "1", float(s["x1"]), float(s["y1"])))
+        pts.append((i, "2", float(s["x2"]), float(s["y2"])))
+    n = len(pts)
+    if n < 2:
+        return []
+
+    # Union-find over endpoint pairs within tol. Avoids the optional
+    # networkx dependency that would otherwise be needed only here; for
+    # n <= 250 (our worst case) the O(N^2) edge scan is microseconds.
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    tol2 = tol * tol
+    for i in range(n):
+        xi, yi = pts[i][2], pts[i][3]
+        for j in range(i + 1, n):
+            dx = pts[j][2] - xi
+            dy = pts[j][3] - yi
+            if dx * dx + dy * dy <= tol2:
+                _union(i, j)
+
+    comps: Dict[int, List[int]] = {}
+    for k in range(n):
+        comps.setdefault(_find(k), []).append(k)
+
+    cands: List[C.Candidate] = []
+    for root, members in comps.items():
+        if len(members) < 2:
+            continue
+        # Wall-priority anchor mean (matches legacy exactly).
+        prios = [_TYPE_PRIORITY.get(segments[pts[k][0]].get("type", ""), 99)
+                 for k in members]
+        top = min(prios)
+        anchor_xs = [pts[k][2] for k, p in zip(members, prios) if p == top]
+        anchor_ys = [pts[k][3] for k, p in zip(members, prios) if p == top]
+        cx = round(float(np.mean(anchor_xs)), 4)
+        cy = round(float(np.mean(anchor_ys)), 4)
+
+        mutates: List[Tuple[int, str, float, float]] = []
+        for k in members:
+            seg_idx, end, x, y = pts[k]
+            if abs(x - cx) <= 1e-12 and abs(y - cy) <= 1e-12:
+                continue
+            mutates.append((seg_idx, end, cx, cy))
+        if not mutates:
+            continue
+        cands.append(C.Candidate(
+            op="cluster_2d",
+            add=[],
+            remove=[],
+            mutate=mutates,
+            meta={
+                "component_size": len(members),
+                "moved_count": len(mutates),
+                "canonical": (cx, cy),
+            },
+        ))
+
+    return cands

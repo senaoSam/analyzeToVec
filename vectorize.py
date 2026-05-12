@@ -2005,6 +2005,58 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_2d_cluster_candidates(lines: List[Dict],
+                                   *,
+                                   tol: float,
+                                   ) -> List[Dict]:
+    """Step 7 phase 5: candidate-based ``snap_endpoints``.
+
+    Runs ``generators.endpoint_cluster_2d_candidates`` and applies each
+    component-mutate in sequence. ``skip_score=True`` (legacy is
+    unconditional; the safety net is the geometric gate -- 2D circular
+    tol + wall-priority anchor -- reproduced exactly inside the
+    generator).
+
+    Final 4-decimal rounding on EVERY endpoint mirrors legacy, which
+    rounds the canonical coord (even for singleton components) before
+    writing the output segment. Without this post-step the cluster
+    candidates would only round non-singleton members; the singletons
+    would retain whatever sub-4-decimal precision earlier passes left
+    behind, breaking bit-identical regression.
+
+    Components are independent (union-find partitions are disjoint by
+    construction), so the order of accept within a single generator
+    pass doesn't change the final state. We don't re-generate after
+    each accept -- legacy is single-pass and re-clustering would only
+    create new components for endpoints that ALREADY snapped to a
+    canonical, which legacy doesn't do.
+    """
+    import candidates as C
+    import generators as G
+    if not lines:
+        return list(lines)
+
+    cands = G.endpoint_cluster_2d_candidates(lines, tol=tol)
+    current = list(lines)
+    for cand in cands:
+        current = C.apply_candidate(current, cand)
+
+    # Bit-identical post-step: legacy ``snap_endpoints`` rounds EVERY
+    # output endpoint to 4 decimals. Apply uniformly across the segment
+    # list, including segments untouched by any candidate.
+    rounded: List[Dict] = []
+    for s in current:
+        ns = dict(s)
+        ns["x1"] = round(float(ns["x1"]), 4)
+        ns["y1"] = round(float(ns["y1"]), 4)
+        ns["x2"] = round(float(ns["x2"]), 4)
+        ns["y2"] = round(float(ns["y2"]), 4)
+        if (ns["x1"], ns["y1"]) == (ns["x2"], ns["y2"]):
+            continue
+        rounded.append(ns)
+    return rounded
+
+
 def _accept_t_project_candidates(lines: List[Dict],
                                   *,
                                   fallback_tol: float,
@@ -2912,7 +2964,11 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
     s3 = merge_collinear(s3, merge_perp, merge_gap)
 
     # Wall-priority NetworkX node merge.
-    s4 = snap_endpoints(s3, snap_tol)
+    # Step 7 phase 5: candidate-based wrapper around the 2D circular-tol
+    # cluster. Union-find replaces the inline NetworkX dependency; the
+    # cluster semantic (top-priority anchor mean, 4-decimal round on
+    # every output endpoint) matches legacy ``snap_endpoints`` exactly.
+    s4 = _accept_2d_cluster_candidates(s3, tol=snap_tol)
 
     # prune_tails removed in step 4.8: try removal and revert if FAIL.
     s5 = s4
