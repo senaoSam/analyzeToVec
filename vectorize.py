@@ -495,73 +495,9 @@ def branches_to_segments(branches: List[List[Tuple[int, int]]]) -> List[Tuple[fl
 # ---------------------------------------------------------------------------
 # Step 4: NetworkX node snapping
 # ---------------------------------------------------------------------------
-
-def snap_endpoints(typed_segments: List[Dict],
-                   tolerance: float) -> List[Dict]:
-    """Cluster endpoints within `tolerance` and rewrite segments to canonical points.
-
-    typed_segments: list of {"type", "x1", "y1", "x2", "y2"}.
-    Returns a new list with snapped coordinates and any zero-length segments
-    (collapsed by snapping) removed.
-    """
-    # Step A: gather all endpoints as (idx, end, x, y), end in {"a","b"}.
-    pts = []
-    for i, seg in enumerate(typed_segments):
-        pts.append((i, "a", seg["x1"], seg["y1"]))
-        pts.append((i, "b", seg["x2"], seg["y2"]))
-
-    # Step B: build a graph linking points that are within tolerance.
-    # Connected components -> clusters that get merged to a centroid.
-    g = nx.Graph()
-    for k in range(len(pts)):
-        g.add_node(k)
-
-    coords = np.array([[p[2], p[3]] for p in pts], dtype=np.float64)
-
-    # O(n^2) is fine — node count is small for floorplans, and per the spec
-    # we prioritize precision over performance.
-    n = len(pts)
-    tol2 = tolerance * tolerance
-    for i in range(n):
-        xi, yi = coords[i]
-        for j in range(i + 1, n):
-            dx = coords[j, 0] - xi
-            dy = coords[j, 1] - yi
-            if dx * dx + dy * dy <= tol2:
-                g.add_edge(i, j)
-
-    # Step C: each connected component collapses to a canonical point.
-    # Anchor priority: walls win over windows/doors so chromatic endpoints
-    # snap onto the wall, not the other way round. Within a single priority
-    # tier the points are averaged.
-    canonical: Dict[int, Tuple[float, float]] = {}
-    for comp in nx.connected_components(g):
-        comp = list(comp)
-        # Find the highest priority (lowest number) among endpoints in comp.
-        prios = [TYPE_PRIORITY.get(typed_segments[pts[k][0]]["type"], 99)
-                 for k in comp]
-        top = min(prios)
-        anchor_idx = [k for k, p in zip(comp, prios) if p == top]
-        cx = float(np.mean([coords[k, 0] for k in anchor_idx]))
-        cy = float(np.mean([coords[k, 1] for k in anchor_idx]))
-        for k in comp:
-            canonical[k] = (cx, cy)
-
-    # Step D: rewrite typed_segments.
-    out = []
-    for k_a in range(0, n, 2):
-        k_b = k_a + 1
-        idx = pts[k_a][0]
-        ax, ay = canonical[k_a]
-        bx, by = canonical[k_b]
-        if (ax, ay) == (bx, by):
-            continue  # collapsed to a point
-        out.append({
-            "type": typed_segments[idx]["type"],
-            "x1": round(ax, 4), "y1": round(ay, 4),
-            "x2": round(bx, 4), "y2": round(by, 4),
-        })
-    return out
+#
+# Legacy ``snap_endpoints`` was deleted in step 7 phase 6 (dead code after
+# phase 5 migrated the call site to ``_accept_2d_cluster_candidates``).
 
 
 # ---------------------------------------------------------------------------
@@ -595,60 +531,9 @@ def axis_align_segments(segments: List[Dict], tol_deg: float) -> List[Dict]:
     return out
 
 
-def snap_colinear_coords(segments: List[Dict], tol: float) -> List[Dict]:
-    """Cluster endpoint x-values (and y-values) within `tol` and unify them.
-
-    Tightened: tol should be very small (≤3 px) so that genuinely distinct
-    walls don't get flattened onto a shared axis. Within each cluster, wall
-    coordinates anchor — chromatic (window/door) values snap onto walls.
-    """
-    if not segments:
-        return segments
-
-    # Each tagged value is (coord_value, type). The cluster's canonical value
-    # is the mean of the highest-priority (lowest TYPE_PRIORITY) members.
-    def _cluster_1d_anchored(tagged: List[Tuple[float, str]],
-                             tol: float) -> Dict[Tuple[float, str], float]:
-        if not tagged:
-            return {}
-        order = sorted(tagged, key=lambda t: t[0])
-        clusters: List[List[Tuple[float, str]]] = [[order[0]]]
-        for v in order[1:]:
-            if v[0] - clusters[-1][-1][0] <= tol:
-                clusters[-1].append(v)
-            else:
-                clusters.append([v])
-        mapping: Dict[Tuple[float, str], float] = {}
-        for grp in clusters:
-            prios = [TYPE_PRIORITY.get(t, 99) for _, t in grp]
-            top = min(prios)
-            anchors = [val for (val, t), p in zip(grp, prios) if p == top]
-            canon = float(np.mean(anchors))
-            for entry in grp:
-                mapping[entry] = canon
-        return mapping
-
-    xs_tagged: List[Tuple[float, str]] = []
-    ys_tagged: List[Tuple[float, str]] = []
-    for seg in segments:
-        xs_tagged.append((seg["x1"], seg["type"]))
-        xs_tagged.append((seg["x2"], seg["type"]))
-        ys_tagged.append((seg["y1"], seg["type"]))
-        ys_tagged.append((seg["y2"], seg["type"]))
-    xmap = _cluster_1d_anchored(xs_tagged, tol)
-    ymap = _cluster_1d_anchored(ys_tagged, tol)
-
-    out = []
-    for seg in segments:
-        t = seg["type"]
-        x1 = xmap.get((seg["x1"], t), seg["x1"])
-        x2 = xmap.get((seg["x2"], t), seg["x2"])
-        y1 = ymap.get((seg["y1"], t), seg["y1"])
-        y2 = ymap.get((seg["y2"], t), seg["y2"])
-        if (x1, y1) == (x2, y2):
-            continue
-        out.append({**seg, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
-    return out
+# Legacy ``snap_colinear_coords`` was deleted in step 7 phase 6 (dead code
+# after phase 4 migrated its call site to ``_accept_fuse_candidates`` with
+# ``masks=None`` and a fixed ``fallback_tol = colinear_tol``).
 
 
 # ---------------------------------------------------------------------------
@@ -1121,92 +1006,9 @@ def manhattan_intersection_snap(segments: List[Dict], tol: float,
     return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
 
 
-def manhattan_t_project(segments: List[Dict], tol: float,
-                        *,
-                        masks: Optional[Dict[str, np.ndarray]] = None
-                        ) -> List[Dict]:
-    """Step 3: T-junction projection.
-
-    For every endpoint, scan every orthogonal segment whose body the
-    endpoint perpendicularly projects onto within tol. If the endpoint is
-    H, it can only T onto a V trunk: rewrite endpoint x to the trunk's x
-    (endpoint y is the H's y, untouched). Symmetric for V endpoints onto
-    an H trunk.
-
-    Wall-priority: walls never project onto chromatic trunks (TYPE_PRIORITY).
-    The trunk segment is never modified.
-
-    Step 4.9.4: when ``masks`` is given, the per-pair tolerance becomes
-    the trunk's thickness-aware tol ``clamp(0.25 * trunk_thickness, 2, 6)``.
-    The trunk's thickness is the geometrically correct gate here: the
-    endpoint moves perpendicular to the trunk's body axis, so "how far
-    into the trunk's body the endpoint may be pulled" is set by the trunk.
-    The probing segment's own thickness is irrelevant — only its endpoint
-    is moving, the body stays put. The body-extent guard ``lo - tol <= ey
-    <= hi + tol`` keeps using the trunk's own tol (along-axis slack, same
-    rationale: how far past the trunk's end can we count as "on the
-    trunk's line").
-    """
-    segs = [dict(s) for s in segments]
-    n = len(segs)
-    axis = [_seg_axis_strict(s) for s in segs]
-    tols = _compute_seg_tols(segs, masks, fallback=tol) if masks is not None \
-        else [tol] * n
-
-    for i in range(n):
-        seg = segs[i]
-        my_axis = axis[i]
-        for end in ("1", "2"):
-            ex = seg[f"x{end}"]
-            ey = seg[f"y{end}"]
-            best = None
-            # Cross-trunk tie-breaker only: each trunk gates with its own
-            # ``trunk_tol`` below (``d <= trunk_tol``), so ``best_d`` just
-            # tracks the closest accepted candidate across trunks.
-            best_d = float("inf")
-            for j in range(n):
-                if i == j:
-                    continue
-                if axis[j] == my_axis:
-                    continue  # parallel can't form a T
-                # Forbid wall->chromatic projection: the wall holds.
-                if (TYPE_PRIORITY.get(seg["type"], 99)
-                        < TYPE_PRIORITY.get(segs[j]["type"], 99)):
-                    continue
-                trunk = segs[j]
-                trunk_tol = tols[j]
-                if axis[j] == "v":
-                    line_x = trunk["x1"]
-                    lo, hi = sorted((trunk["y1"], trunk["y2"]))
-                    # Endpoint y must lie within the trunk's body (with tol).
-                    if not (lo - trunk_tol <= ey <= hi + trunk_tol):
-                        continue
-                    d = abs(ex - line_x)
-                    if d <= trunk_tol and d < best_d:
-                        best_d = d
-                        best = (line_x, ey)  # exact projection
-                else:  # trunk is horizontal
-                    line_y = trunk["y1"]
-                    lo, hi = sorted((trunk["x1"], trunk["x2"]))
-                    if not (lo - trunk_tol <= ex <= hi + trunk_tol):
-                        continue
-                    d = abs(ey - line_y)
-                    if d <= trunk_tol and d < best_d:
-                        best_d = d
-                        best = (ex, line_y)
-            if best is not None:
-                seg[f"x{end}"] = best[0]
-                seg[f"y{end}"] = best[1]
-                # Preserve own axis: if I'm horizontal, my y must be uniform
-                # on both ends; if vertical, my x must be uniform.
-                if my_axis == "h":
-                    other = "2" if end == "1" else "1"
-                    seg[f"y{other}"] = best[1]
-                else:
-                    other = "2" if end == "1" else "1"
-                    seg[f"x{other}"] = best[0]
-
-    return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+# Legacy ``manhattan_t_project`` was deleted in step 7 phase 6 (dead code
+# after phase 2 migrated its call site to ``_accept_t_project_candidates``
+# with thickness-aware masks).
 
 
 def manhattan_ultimate_merge(segments: List[Dict]) -> List[Dict]:
@@ -1417,84 +1219,9 @@ def cluster_parallel_duplicates(segments: List[Dict],
     return out
 
 
-def grid_snap_endpoints(segments: List[Dict], tol: float) -> List[Dict]:
-    """Treat each axis-aligned segment as an infinite reference line. For
-    every endpoint, find the closest orthogonal reference line within tol
-    perpendicular distance whose body covers the endpoint's along-axis
-    coordinate, and pull the endpoint to that exact line.
-
-    The segment's own axis identity is preserved (a horizontal stays
-    horizontal: only its x at one end changes; a vertical stays vertical:
-    only its y at one end changes). This is the "snap to guideline"
-    behaviour the user asked for.
-    """
-    segs = [dict(s) for s in segments]
-    n = len(segs)
-    axis = [_seg_axis_strict(s) for s in segs]
-
-    # Pre-compute reference lines per orientation:
-    # horizontal lines as (line_y, lo_x, hi_x, type)
-    # vertical lines as (line_x, lo_y, hi_y, type)
-    h_refs: List[Tuple[float, float, float, str, int]] = []
-    v_refs: List[Tuple[float, float, float, str, int]] = []
-    for j, s in enumerate(segs):
-        if axis[j] == "h":
-            lo, hi = sorted((s["x1"], s["x2"]))
-            h_refs.append((s["y1"], lo, hi, s["type"], j))
-        else:
-            lo, hi = sorted((s["y1"], s["y2"]))
-            v_refs.append((s["x1"], lo, hi, s["type"], j))
-
-    for i in range(n):
-        my_type = segs[i]["type"]
-        my_prio = TYPE_PRIORITY.get(my_type, 99)
-        if axis[i] == "v":
-            # Vertical's endpoints have variable y; snap each y to the
-            # closest horizontal reference line.
-            for end in ("1", "2"):
-                ex = segs[i][f"x{end}"]
-                ey = segs[i][f"y{end}"]
-                best_y = None
-                best_d = tol
-                for (line_y, lo, hi, ref_t, j) in h_refs:
-                    if i == j:
-                        continue
-                    if my_prio < TYPE_PRIORITY.get(ref_t, 99):
-                        continue  # walls don't snap to chromatic refs
-                    # The endpoint's x must lie within the horizontal body
-                    # (with tol) so we don't snap to a wall on the other
-                    # side of the building.
-                    if not (lo - tol <= ex <= hi + tol):
-                        continue
-                    d = abs(ey - line_y)
-                    if d < best_d:
-                        best_d = d
-                        best_y = line_y
-                if best_y is not None:
-                    segs[i][f"y{end}"] = best_y
-        else:  # horizontal
-            for end in ("1", "2"):
-                ex = segs[i][f"x{end}"]
-                ey = segs[i][f"y{end}"]
-                best_x = None
-                best_d = tol
-                for (line_x, lo, hi, ref_t, j) in v_refs:
-                    if i == j:
-                        continue
-                    if my_prio < TYPE_PRIORITY.get(ref_t, 99):
-                        continue
-                    if not (lo - tol <= ey <= hi + tol):
-                        continue
-                    d = abs(ex - line_x)
-                    if d < best_d:
-                        best_d = d
-                        best_x = line_x
-                if best_x is not None:
-                    segs[i][f"x{end}"] = best_x
-
-    return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
-
-
+# Legacy ``grid_snap_endpoints`` was deleted in step 7 phase 6 (dead code
+# after phase 3 migrated its call site to ``_accept_t_project_candidates``
+# with ``masks=None`` and a fixed ``fallback_tol = grid_snap``).
 
 
 # ---------------------------------------------------------------------------
@@ -2537,76 +2264,10 @@ def insert_missing_connectors(lines: List[Dict],
     lines.extend(current)
 
 
-def fuse_close_endpoints(lines: List[Dict], tol: float,
-                         *,
-                         masks: Optional[Dict[str, np.ndarray]] = None
-                         ) -> None:
-    """Mutate `lines` IN PLACE: cluster all endpoint x's within tol to a
-    single canonical x (and same for y's). After this every endpoint that
-    was within `tol` of another shares the EXACT same coordinate.
-
-    Wall-priority: when a cluster contains both a wall coordinate and a
-    chromatic coordinate, the wall coordinate wins.
-
-    Step 4.9.4: when ``masks`` is given, each endpoint carries its host
-    segment's thickness-aware tol ``clamp(0.25 * local_thickness, 2, 6)``.
-    The sort-and-walk cluster uses the *minimum* of two neighbours' tols
-    as the join threshold — strict, so a thin partition doesn't get glued
-    to a separate thick wall just because the thick wall has high tol.
-    The cluster's canonical coordinate still uses wall-priority mean (a
-    cluster with one wall and several door coords resolves to the wall x
-    even though the doors have tighter tols).
-    """
-    if not lines:
-        return
-
-    # Build per-segment thickness tols once. The clusters need per-endpoint
-    # access, so duplicate each segment's tol into its two endpoint entries.
-    seg_tols = _compute_seg_tols(lines, masks, fallback=tol) \
-        if masks is not None else [tol] * len(lines)
-
-    # Collect all endpoint coordinates with their owning segment's type
-    # and the per-endpoint tol.
-    xs: List[Tuple[float, str, float]] = []
-    ys: List[Tuple[float, str, float]] = []
-    for s, st in zip(lines, seg_tols):
-        xs.append((s["x1"], s["type"], st))
-        xs.append((s["x2"], s["type"], st))
-        ys.append((s["y1"], s["type"], st))
-        ys.append((s["y2"], s["type"], st))
-
-    def _cluster(tagged: List[Tuple[float, str, float]]
-                 ) -> Dict[Tuple[float, str], float]:
-        if not tagged:
-            return {}
-        order = sorted(tagged, key=lambda p: p[0])
-        clusters: List[List[Tuple[float, str, float]]] = [[order[0]]]
-        for v in order[1:]:
-            prev = clusters[-1][-1]
-            join_tol = min(v[2], prev[2])
-            if v[0] - prev[0] <= join_tol:
-                clusters[-1].append(v)
-            else:
-                clusters.append([v])
-        mapping: Dict[Tuple[float, str], float] = {}
-        for grp in clusters:
-            prios = [TYPE_PRIORITY.get(t, 99) for _, t, _ in grp]
-            top = min(prios)
-            anchors = [val for (val, t, _), p in zip(grp, prios) if p == top]
-            canon = float(np.mean(anchors))
-            for val, t, _ in grp:
-                mapping[(val, t)] = canon
-        return mapping
-
-    xmap = _cluster(xs)
-    ymap = _cluster(ys)
-
-    for s in lines:
-        t = s["type"]
-        s["x1"] = xmap.get((s["x1"], t), s["x1"])
-        s["x2"] = xmap.get((s["x2"], t), s["x2"])
-        s["y1"] = ymap.get((s["y1"], t), s["y1"])
-        s["y2"] = ymap.get((s["y2"], t), s["y2"])
+# Legacy ``fuse_close_endpoints`` was deleted in step 7 phase 6 (dead code
+# after phase 1 migrated its call site to ``_accept_fuse_candidates`` with
+# thickness-aware masks; the same generator covers ``snap_colinear_coords``
+# via phase 4 with ``masks=None``).
 
 
 # ---------------------------------------------------------------------------

@@ -36,32 +36,36 @@ REF_IMAGES = [
 
 PASSES: List[Tuple[str, str]] = [
     # (id, human-readable description). Mirrors the current vectorize_bgr
-    # geometric-optimisation pipeline (step 6 phase 3 state). Notes:
+    # geometric-optimisation pipeline (step 7 phase 5 state). Notes:
     #   - ``manhattan_intersection_snap`` removed step 4.9.7 (pure NO-OP
     #     post canonical_line + thickness-aware manhattan_t_project)
-    #   - ``cluster_parallel`` is now the step 6 phase 3 candidate-based
+    #   - ``cluster_parallel`` is the step 6 phase 3 candidate-based
     #     ``_accept_parallel_merge_candidates(skip_score=True)``
     #   - ``merge_final`` is the step 6 phase 1 candidate-based
     #     ``_accept_merge_candidates(perp_tol=0, gap_tol=0,
-    #     junction_aware=True)`` (was ``manhattan_merge_4`` in older
-    #     ablation runs)
+    #     junction_aware=True)``
+    #   - step 7 phases 1-5 migrated all 5 snap passes to candidate-based:
+    #     snap_colinear / snap_endpoints_1 -> endpoint_fuse / cluster_2d,
+    #     manhattan_t_project / grid_snap_2 -> t_project_candidates,
+    #     fuse_close_endpoints -> endpoint_fuse_candidates. Ablation labels
+    #     keep the legacy IDs so historical CSVs are still comparable.
     ("axis_align",            "axis_align_segments"),
-    ("snap_colinear",         "snap_colinear_coords"),
+    ("snap_colinear",         "_accept_fuse_candidates (step 7 phase 4)"),
     ("merge_collin_1",        "merge_collinear (pre-T/L)"),
     ("t_junction_snap",       "t_junction_snap"),
     ("truncate_overshoots",   "truncate_overshoots"),
     ("merge_collin_2",        "merge_collinear (post T/L)"),
-    ("snap_endpoints_1",      "snap_endpoints"),
+    ("snap_endpoints_1",      "_accept_2d_cluster_candidates (step 7 phase 5)"),
     ("manhattan_force_axis",  "manhattan_force_axis"),
     ("canonical_line",        "canonicalize_offsets (step 4.9.2)"),
-    ("manhattan_t_project",   "manhattan_t_project"),
+    ("manhattan_t_project",   "_accept_t_project_candidates (step 7 phase 2)"),
     ("cluster_parallel",      "_accept_parallel_merge_candidates (step 6 phase 3)"),
-    ("grid_snap_2",           "grid_snap_endpoints"),
+    ("grid_snap_2",           "_accept_t_project_candidates (step 7 phase 3)"),
     ("t_snap_with_extension", "t_snap_with_extension (candidate)"),
     ("brute_force_ray",       "brute_force_ray_extend (candidate)"),
     ("insert_connectors",     "insert_missing_connectors (candidate)"),
     ("proximal_bridge",       "_accept_bridge_candidates (step 4.7)"),
-    ("fuse_close_endpoints",  "fuse_close_endpoints"),
+    ("fuse_close_endpoints",  "_accept_fuse_candidates (step 7 phase 1)"),
     ("merge_final",           "_accept_merge_candidates (step 6 phase 1)"),
 ]
 
@@ -116,7 +120,9 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
     if disabled != "axis_align":
         s = V.axis_align_segments(s, V.AXIS_SNAP_DEG)
     if disabled != "snap_colinear":
-        s = V.snap_colinear_coords(s, t["colinear"])
+        # Step 7 phase 4: candidate-based 1D fuse (fixed colinear_tol).
+        s = V._accept_fuse_candidates(s, fallback_tol=t["colinear"],
+                                       masks=None)
     if disabled != "merge_collin_1":
         s = V.merge_collinear(s, t["merge_perp"], t["merge_gap"])
     if disabled != "t_junction_snap":
@@ -126,7 +132,8 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
     if disabled != "merge_collin_2":
         s = V.merge_collinear(s, t["merge_perp"], t["merge_gap"])
     if disabled != "snap_endpoints_1":
-        s = V.snap_endpoints(s, t["snap"])
+        # Step 7 phase 5: candidate-based 2D NetworkX-style cluster.
+        s = V._accept_2d_cluster_candidates(s, tol=t["snap"])
     if disabled != "manhattan_force_axis":
         s = V.manhattan_force_axis(s)
     if disabled != "canonical_line":
@@ -134,7 +141,9 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
                                    attach_thickness=True)
     # manhattan_intersection_snap call removed step 4.9.7 (pure NO-OP)
     if disabled != "manhattan_t_project":
-        s = V.manhattan_t_project(s, t["manhattan"], masks=masks)
+        # Step 7 phase 2: candidate-based thickness-aware T-project.
+        s = V._accept_t_project_candidates(
+            s, fallback_tol=t["manhattan"], masks=masks)
     if disabled != "cluster_parallel":
         # Step 6 phase 3: candidate-based parallel merge (skip_score=True).
         s = V._accept_parallel_merge_candidates(
@@ -143,7 +152,9 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
             door_mask=masks.get("door"),
             window_mask=masks.get("window"))
     if disabled != "grid_snap_2":
-        s = V.grid_snap_endpoints(s, t["grid_snap"])
+        # Step 7 phase 3: same generator as manhattan_t_project, fixed tol.
+        s = V._accept_t_project_candidates(
+            s, fallback_tol=t["grid_snap"], masks=None)
     if disabled != "t_snap_with_extension":
         s = V.t_snap_with_extension(s, t["gap_close"], masks=masks)
     if disabled != "brute_force_ray":
@@ -162,7 +173,9 @@ def run_pipeline(bgr: np.ndarray, disabled: str = "") -> Tuple[List[Dict], Dict[
                                          window_mask=masks.get("window"))
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
     if disabled != "fuse_close_endpoints":
-        V.fuse_close_endpoints(s, t["ray_fuse"], masks=masks)
+        # Step 7 phase 1: candidate-based thickness-aware 1D fuse.
+        s = V._accept_fuse_candidates(s, fallback_tol=t["ray_fuse"],
+                                       masks=masks)
     s = [seg for seg in s if (seg["x1"], seg["y1"]) != (seg["x2"], seg["y2"])]
     if disabled != "merge_final":
         # Step 6 phase 1: candidate-based final merge.
