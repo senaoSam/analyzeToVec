@@ -539,61 +539,11 @@ def _classify_axis(seg: Dict) -> str:
 # Step 4d: T-junction node-to-edge snap, and L-corner extend-to-intersect
 # ---------------------------------------------------------------------------
 
-def _point_on_axis_seg(px: float, py: float, seg: Dict,
-                       perp_tol: float) -> Tuple[bool, float, float]:
-    """If (px,py) is within perp_tol of an axis-aligned seg's body (not just
-    its endpoints), return (True, snapped_x, snapped_y). Otherwise (False, ...).
-    """
-    axis = _classify_axis(seg)
-    if axis == "h":
-        lo, hi = sorted((seg["x1"], seg["x2"]))
-        line_y = seg["y1"]
-        # Must lie strictly inside the span (with a small tolerance) to count
-        # as a T-snap rather than an endpoint coincidence.
-        if abs(py - line_y) <= perp_tol and (lo - perp_tol) <= px <= (hi + perp_tol):
-            sx = min(max(px, lo), hi)
-            return True, sx, line_y
-    elif axis == "v":
-        lo, hi = sorted((seg["y1"], seg["y2"]))
-        line_x = seg["x1"]
-        if abs(px - line_x) <= perp_tol and (lo - perp_tol) <= py <= (hi + perp_tol):
-            sy = min(max(py, lo), hi)
-            return True, line_x, sy
-    return False, px, py
-
-
-def t_junction_snap(segments: List[Dict], tol: float) -> List[Dict]:
-    """Pull free endpoints onto the body of any orthogonal segment within tol.
-
-    Anchor rule: a wall endpoint never snaps onto a chromatic (window/door)
-    body — the wall is the structural backbone, so chromatic geometry must
-    yield to walls, not the other way around. Same-type snapping is always
-    allowed; chromatic-onto-wall is the primary use case.
-    """
-    segs = [dict(s) for s in segments]
-    for i, seg in enumerate(segs):
-        for end in ("1", "2"):
-            ex_key, ey_key = f"x{end}", f"y{end}"
-            ex, ey = seg[ex_key], seg[ey_key]
-            best = None
-            best_d = tol
-            for j, other in enumerate(segs):
-                if j == i or _classify_axis(other) == "d":
-                    continue
-                # Anchor rule: forbid wall -> chromatic. Allow everything else.
-                if (TYPE_PRIORITY.get(seg["type"], 99)
-                        < TYPE_PRIORITY.get(other["type"], 99)):
-                    continue
-                ok, sx, sy = _point_on_axis_seg(ex, ey, other, tol)
-                if not ok:
-                    continue
-                d = float(np.hypot(sx - ex, sy - ey))
-                if d < best_d:
-                    best_d = d
-                    best = (sx, sy)
-            if best is not None:
-                seg[ex_key], seg[ey_key] = best
-    return [s for s in segs if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+# Legacy ``_point_on_axis_seg`` + ``t_junction_snap`` were deleted in step
+# 10 phase 3 (dead code after phase 2 migrated the call site to
+# ``_accept_t_junction_snap_candidates``; the helper is reproduced
+# locally inside ``generators.t_junction_snap_candidates`` as
+# ``_point_on_axis_seg_local``).
 
 
 
@@ -693,28 +643,9 @@ def prune_tails(segments: List[Dict], min_len: float,
 # ---------------------------------------------------------------------------
 
 
-def manhattan_force_axis(segments: List[Dict]) -> List[Dict]:
-    """Step 1: every segment becomes exactly H or exactly V.
-
-    Classification rule: |dx| >= |dy| -> horizontal; otherwise vertical.
-    There is no "diagonal" outcome — diagonals are eliminated by force.
-    Off-axis coordinate is set to the average of the two ends; that's the
-    only averaging in the Manhattan stage and it stays inside the segment.
-    """
-    out: List[Dict] = []
-    for seg in segments:
-        x1, y1, x2, y2 = seg["x1"], seg["y1"], seg["x2"], seg["y2"]
-        if (x1, y1) == (x2, y2):
-            continue
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
-        if dx >= dy:
-            ymid = 0.5 * (y1 + y2)
-            out.append({**seg, "x1": x1, "y1": ymid, "x2": x2, "y2": ymid})
-        else:
-            xmid = 0.5 * (x1 + x2)
-            out.append({**seg, "x1": xmid, "y1": y1, "x2": xmid, "y2": y2})
-    return out
+# Legacy ``manhattan_force_axis`` was deleted in step 10 phase 3 (dead
+# code after phase 1 migrated its call site to
+# ``_accept_manhattan_force_axis_candidates``).
 
 
 def _seg_axis_strict(seg: Dict) -> str:

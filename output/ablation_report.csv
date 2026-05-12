@@ -8,35 +8,35 @@ snap_colinear,_accept_fuse_candidates (step 7 phase 4),Gemini_Generated_Image_p4
 merge_collin_1,_accept_cluster_collinear_merge_candidates (step 8 phase 2),source.png,102,104,2,16,16,0,0,0.8329,0.838,0.93,73,16,15
 merge_collin_1,_accept_cluster_collinear_merge_candidates (step 8 phase 2),sg2.png,124,122,-2,29,28,-1,0,0.7592,0.7328,0.9198,92,13,17
 merge_collin_1,_accept_cluster_collinear_merge_candidates (step 8 phase 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,103,4,38,40,2,0,0.7728,0.7834,0.7179,78,8,17
-t_junction_snap,t_junction_snap,source.png,102,101,-1,16,13,-3,0,0.848,0.838,0.894,68,16,17
-t_junction_snap,t_junction_snap,sg2.png,124,118,-6,29,34,5,0,0.7477,0.7328,0.8375,88,13,17
-t_junction_snap,t_junction_snap,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,97,-2,38,39,1,0,0.7769,0.7834,0.8062,72,8,17
+t_junction_snap,_accept_t_junction_snap_candidates (step 10 phase 2),source.png,102,101,-1,16,13,-3,0,0.848,0.838,0.894,68,16,17
+t_junction_snap,_accept_t_junction_snap_candidates (step 10 phase 2),sg2.png,124,118,-6,29,34,5,0,0.7477,0.7328,0.8375,88,13,17
+t_junction_snap,_accept_t_junction_snap_candidates (step 10 phase 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,97,-2,38,39,1,0,0.7769,0.7834,0.8062,72,8,17
 truncate_overshoots,_accept_truncate_overshoot_candidates (step 9 phase 2),source.png,102,102,0,16,16,0,0,0.838,0.838,1.0,71,16,15
 truncate_overshoots,_accept_truncate_overshoot_candidates (step 9 phase 2),sg2.png,124,123,-1,29,30,1,0,0.7647,0.7328,0.8269,93,13,17
 truncate_overshoots,_accept_truncate_overshoot_candidates (step 9 phase 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,100,1,38,39,1,0,0.7837,0.7834,0.9465,75,8,17
 merge_collin_2,_accept_cluster_collinear_merge_candidates (step 8 phase 3),source.png,102,102,0,16,16,0,0,0.838,0.838,1.0,71,16,15
 merge_collin_2,_accept_cluster_collinear_merge_candidates (step 8 phase 3),sg2.png,124,124,0,29,26,-3,0,0.7518,0.7328,0.9669,94,13,17
-merge_collin_2,_accept_cluster_collinear_merge_candidates (step 8 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,100,1,38,36,-2,0,0.782,0.7834,0.9619,75,8,17
-snap_endpoints_1,_accept_2d_cluster_candidates (step 7 phase 5),source.png,102,109,7,16,23,7,0,0.8148,0.838,0.9793,78,16,15
-snap_endpoints_1,_accept_2d_cluster_candidates (step 7 phase 5),sg2.png,124,127,3,29,30,1,1,0.7561,0.7328,0.8103,97,13,17
-snap_endpoints_1,_accept_2d_cluster_candidates (step 7 phase 5),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,115,16,38,54,16,0,0.7804,0.7834,0.7622,86,12,17
-manhattan_force_axis,manhattan_force_axis,source.png,102,129,27,16,11,-5,11,0.8538,0.838,0.8781,97,16,16
-manhattan_force_axis,manhattan_force_axis,sg2.png,124,156,32,29,30,1,15,0.7223,0.7328,0.7996,126,13,17
-manhattan_force_axis,manhattan_force_axis,Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,144,45,38,31,-7,31,0.7672,0.7834,0.6576,116,10,18
+merge_collin_2,_accept_cluster_collinear_merge_candidates (step 8 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,100,1,38,36,-2,0,0.782,0.7834,0.946,75,8,17
+snap_endpoints_1,_accept_2d_cluster_candidates (step 7 phase 5),source.png,102,123,21,16,22,6,2,0.8192,0.838,0.9759,92,16,15
+snap_endpoints_1,_accept_2d_cluster_candidates (step 7 phase 5),sg2.png,124,127,3,29,27,-2,1,0.7548,0.7328,0.8103,97,13,17
+snap_endpoints_1,_accept_2d_cluster_candidates (step 7 phase 5),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,115,16,38,57,19,1,0.7805,0.7834,0.78,86,12,17
+manhattan_force_axis,_accept_manhattan_force_axis_candidates (step 10 phase 1),source.png,102,129,27,16,11,-5,11,0.8538,0.838,0.8781,97,16,16
+manhattan_force_axis,_accept_manhattan_force_axis_candidates (step 10 phase 1),sg2.png,124,156,32,29,27,-2,15,0.7249,0.7328,0.8015,125,14,17
+manhattan_force_axis,_accept_manhattan_force_axis_candidates (step 10 phase 1),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,144,45,38,31,-7,30,0.7636,0.7834,0.6569,117,10,17
 canonical_line,_accept_canonicalize_offset_candidates (step 9 phase 3),source.png,102,102,0,16,16,0,0,0.838,0.838,1.0,71,16,15
 canonical_line,_accept_canonicalize_offset_candidates (step 9 phase 3),sg2.png,124,126,2,29,28,-1,0,0.7344,0.7328,0.9721,96,13,17
-canonical_line,_accept_canonicalize_offset_candidates (step 9 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,100,1,38,41,3,0,0.7758,0.7834,0.8997,75,8,17
+canonical_line,_accept_canonicalize_offset_candidates (step 9 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,101,2,38,42,4,0,0.7758,0.7834,0.9792,76,8,17
 manhattan_t_project,_accept_t_project_candidates (step 7 phase 2),source.png,102,100,-2,16,18,2,0,0.8077,0.838,0.9832,69,16,15
 manhattan_t_project,_accept_t_project_candidates (step 7 phase 2),sg2.png,124,124,0,29,31,2,0,0.7328,0.7328,0.9956,94,13,17
 manhattan_t_project,_accept_t_project_candidates (step 7 phase 2),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,100,1,38,40,2,0,0.7825,0.7834,0.9918,75,8,17
 cluster_parallel,_accept_parallel_merge_candidates (step 6 phase 3),source.png,102,124,22,16,14,-2,0,0.907,0.838,0.7663,89,18,17
-cluster_parallel,_accept_parallel_merge_candidates (step 6 phase 3),sg2.png,124,158,34,29,21,-8,0,0.7062,0.7328,0.7053,127,14,17
-cluster_parallel,_accept_parallel_merge_candidates (step 6 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,118,19,38,41,3,0,0.7426,0.7834,0.8257,84,16,18
+cluster_parallel,_accept_parallel_merge_candidates (step 6 phase 3),sg2.png,124,157,33,29,25,-4,0,0.7222,0.7328,0.7053,126,14,17
+cluster_parallel,_accept_parallel_merge_candidates (step 6 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,117,18,38,38,0,0,0.7426,0.7834,0.8257,84,16,17
 grid_snap_2,_accept_t_project_candidates (step 7 phase 3),source.png,102,110,8,16,15,-1,0,0.8404,0.838,0.9832,79,16,15
 grid_snap_2,_accept_t_project_candidates (step 7 phase 3),sg2.png,124,124,0,29,29,0,0,0.7328,0.7328,1.0,94,13,17
 grid_snap_2,_accept_t_project_candidates (step 7 phase 3),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,99,0,38,38,0,0,0.7813,0.7834,0.9961,74,8,17
 t_snap_with_extension,t_snap_with_extension (candidate),source.png,102,109,7,16,21,5,0,0.8349,0.838,0.985,78,16,15
-t_snap_with_extension,t_snap_with_extension (candidate),sg2.png,124,126,2,29,32,3,0,0.7337,0.7328,0.9953,96,13,17
+t_snap_with_extension,t_snap_with_extension (candidate),sg2.png,124,126,2,29,29,0,0,0.7337,0.7328,0.9953,96,13,17
 t_snap_with_extension,t_snap_with_extension (candidate),Gemini_Generated_Image_p4kt8zp4kt8zp4kt.png,99,101,2,38,40,2,0,0.7803,0.7834,0.9908,76,8,17
 brute_force_ray,brute_force_ray_extend (candidate),source.png,102,102,0,16,16,0,0,0.838,0.838,1.0,71,16,15
 brute_force_ray,brute_force_ray_extend (candidate),sg2.png,124,126,2,29,32,3,0,0.7341,0.7328,1.0,96,13,17
