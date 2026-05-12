@@ -1395,6 +1395,45 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     )
 
 
+def _accept_manhattan_force_axis_candidates(lines: List[Dict]) -> List[Dict]:
+    """Step 10 phase 1: candidate-based ``manhattan_force_axis``.
+
+    Per-segment independent transformation. Same batch-apply pattern as
+    ``_accept_axis_align_candidates``; preserves input order so the
+    immediate downstream pass (``canonicalize_offsets``, which iterates
+    segments to compute distance-transform thicknesses) sees the same
+    sequence legacy produced.
+    """
+    import candidates as C
+    import generators as G
+    if not lines:
+        return list(lines)
+    cands = G.manhattan_force_axis_candidates(lines)
+    if not cands:
+        return [s for s in lines
+                if (s["x1"], s["y1"]) != (s["x2"], s["y2"])]
+    remove_set: set = set()
+    mutates_by_seg: Dict[int, List[Tuple[str, float, float]]] = {}
+    for cand in cands:
+        for ri in cand.remove:
+            remove_set.add(ri)
+        for (idx, end, x, y) in cand.mutate:
+            mutates_by_seg.setdefault(idx, []).append((end, x, y))
+    out: List[Dict] = []
+    for i, seg in enumerate(lines):
+        if i in remove_set:
+            continue
+        if i in mutates_by_seg:
+            ns = dict(seg)
+            for end, x, y in mutates_by_seg[i]:
+                ns["x" + end] = float(x)
+                ns["y" + end] = float(y)
+            out.append(ns)
+        else:
+            out.append(seg)
+    return out
+
+
 def _accept_canonicalize_offset_candidates(
         lines: List[Dict],
         *,
@@ -2522,7 +2561,12 @@ def vectorize_bgr(bgr: np.ndarray, *, verbose: bool = False) -> Dict:
 
     # --- STRICT MANHATTAN ROUTING (zero diagonals) ----------------------
     # (a) Force every segment to be exactly horizontal or exactly vertical.
-    s6 = manhattan_force_axis(s5)
+    # Step 10 phase 1: candidate-based wrapper. Per-segment forced
+    # axis classification (|dx| >= |dy| -> H else V) + perpendicular
+    # collapse to midpoint. No tol, no gate; full-pipeline load-bearing
+    # on every reference image. The wrapper batches independent
+    # per-seg mutates and preserves input order.
+    s6 = _accept_manhattan_force_axis_candidates(s5)
     # (a.5) Step 4.9: canonicalise parallel offsets. Per (type, axis)
     #       bucket, cluster segment offsets within an adaptive
     #       thickness-aware tolerance (2-6 px) and pull each member's

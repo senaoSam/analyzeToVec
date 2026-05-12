@@ -1423,7 +1423,7 @@ def canonicalize_offset_candidates(segments: List[Dict],
         if len(idxs) < 2:
             continue
         # items[k] = (orig_idx, offset, length, thickness)
-        items = []
+        items: List[Tuple[int, float, float, float]] = []
         for i in idxs:
             seg = segments[i]
             if ax == "h":
@@ -1496,4 +1496,74 @@ def canonicalize_offset_candidates(segments: List[Dict],
                 },
             ))
 
+    return cands
+
+
+# ---------------------------------------------------------------------------
+# Step 10 phase 1: manhattan_force_axis_candidates  (replaces manhattan_force_axis)
+# ---------------------------------------------------------------------------
+#
+# Legacy ``manhattan_force_axis`` is the brutal "Manhattanization" step:
+# every segment is force-classified as H or V based on which dimension is
+# longer, then the off-axis coord is collapsed to the midpoint. There is
+# no tol / gate; even genuinely diagonal segments are forced. Zero-length
+# inputs are pruned.
+#
+# Per-segment independent transformation. Translation to candidates:
+#   * ``prune`` candidate for zero-length inputs
+#   * ``force_axis`` candidate (mutate both endpoints) for each segment
+#     with non-trivial perpendicular drift (i.e. not already strictly
+#     axis-aligned)
+# Already-axis-aligned segments get no candidate (pass through).
+
+def manhattan_force_axis_candidates(segments: List[Dict]) -> List[C.Candidate]:
+    """Emit per-segment Manhattan-force candidates.
+
+    Mirrors ``vectorize.manhattan_force_axis`` exactly:
+      * zero-length: prune candidate (legacy ``continue``s)
+      * |dx| >= |dy|: H -- mutate y1, y2 -> mean(y1, y2); x's unchanged
+      * else: V -- mutate x1, x2 -> mean(x1, x2); y's unchanged
+      * if already perfectly axis-aligned, no candidate emitted
+    """
+    if not segments:
+        return []
+    cands: List[C.Candidate] = []
+    for i, seg in enumerate(segments):
+        x1 = float(seg["x1"]); y1 = float(seg["y1"])
+        x2 = float(seg["x2"]); y2 = float(seg["y2"])
+        if x1 == x2 and y1 == y2:
+            cands.append(C.Candidate(
+                op="prune",
+                add=[],
+                remove=[i],
+                mutate=[],
+                meta={"reason": "zero_length"},
+            ))
+            continue
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        if dx >= dy:
+            ymid = 0.5 * (y1 + y2)
+            if y1 != ymid or y2 != ymid:
+                cands.append(C.Candidate(
+                    op="force_axis",
+                    add=[],
+                    remove=[],
+                    mutate=[(i, "1", x1, ymid),
+                            (i, "2", x2, ymid)],
+                    meta={"axis": "h", "drift": max(abs(y1 - ymid),
+                                                    abs(y2 - ymid))},
+                ))
+        else:
+            xmid = 0.5 * (x1 + x2)
+            if x1 != xmid or x2 != xmid:
+                cands.append(C.Candidate(
+                    op="force_axis",
+                    add=[],
+                    remove=[],
+                    mutate=[(i, "1", xmid, y1),
+                            (i, "2", xmid, y2)],
+                    meta={"axis": "v", "drift": max(abs(x1 - xmid),
+                                                    abs(x2 - xmid))},
+                ))
     return cands
