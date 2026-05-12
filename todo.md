@@ -23,6 +23,7 @@
 | **7** | **Snap family unification** | ✅ **完成**（phase 1–6 全部結案，2026-05-12）| 5 個 legacy snap pass 全部 candidate 化：phase 1 `fuse_close_endpoints` → `endpoint_fuse_candidates`（1D wall-priority cluster、thickness-aware tol、`skip_score=True`）；phase 2 `manhattan_t_project` → `t_project_candidates`（per-endpoint mutate、wall-priority 正交投影、used_endpoints set 模擬 legacy single-pass）；phase 3 `grid_snap_endpoints` 改 call `_accept_t_project_candidates(masks=None)` 共用 phase 2 generator（兩個 legacy pass 共一個 generator）；phase 4 `snap_colinear_coords` 改 call `_accept_fuse_candidates(masks=None)` 共用 phase 1 generator；phase 5 `snap_endpoints` → `endpoint_cluster_2d_candidates`（union-find 取代 NetworkX、4-decimal 收尾 rounding 維持 bit-identical）；phase 6 dead-code 清理（−283 行）+ ablation harness sync。**結果**：5 個 legacy snap call sites 共用 3 個 candidate generator（endpoint_fuse / t_project / cluster_2d）；source/sg2 全程 PASS bit-identical；pre-canonical 兩個 pass（snap_colinear / snap_endpoints）也成功遷移，沒接受 todo.md 原本「pre-canonical 暫緩」的妥協。|
 | **8** | **早期 `merge_collinear` 兩個 call** | ✅ **完成**（phase 1–4 全部結案，2026-05-12）| step 6 phase 2 deferred 的兩個 pre-canonical merge call。Step 7 phase 4/5 證明 pre-canonical 可以 candidate 化（skip_score=True + 嚴格 geometric gate）。Phase 1：寫 `cluster_collinear_merge_candidates` cluster-based generator（1 candidate per along-group、`remove` 列每個成員 idx、`add` 帶 weighted-mean canon_line 的 merged seg）—— 不能用 phase 1 的 pair-based generator，因為 pair fixed-point 用 union length 加權、跟 legacy own length 加權在 3+ chain merge 上 sub-pixel 漂移（step 6 phase 2 已踩過這個雷）。Phase 2：migrate 第一個 call。修了兩個 bit-identical 死角：(a) candidate accept loop 把 merged segs append 到末尾、破壞下游 `t_junction_snap` / `truncate_overshoots` 順序敏感的迭代——改用 non-loop wrapper 依 generator emit 順序組裝 `out = diagonals + [c.add[0] for c in cands]` 對齊 legacy；(b) Python 3.12+ `sum()` 用 Neumaier 補償加法、跟手寫 `+=` 累加在 4+ 成員 cluster 上差 1 ULP（sg2 上有 3 處差異，會在下游 cascade 成 wall IOU 4% drop）——把 `_emit` 改用 `sum(...)` 強制對齊 legacy `_length_weighted`。Phase 3：migrate 第二個 call（同 wrapper、同 generator）。Phase 4：dead-code 清理（刪 `merge_collinear` / `manhattan_ultimate_merge` / `cluster_parallel_duplicates` 三個 legacy merge 函式 + helpers，−278 行）。**結果**：4 個 legacy merge call sites 全部 candidate-based（phase 1 / 3 = step 6、phase 2 / 3 = step 8），3 個 generator 撐 4 個 call site。source/sg2 全程 PASS bit-identical。|
 | **9** | **case-specific 條件式 pass 三個** | ✅ **完成**（phase 1–4 全部結案，2026-05-12）| ablation 顯示 6 個 case-specific（某張圖 NO-OP、其他圖 load-bearing）pass，其中 3 個還是 legacy：`axis_align_segments`、`truncate_overshoots`、`canonicalize_offsets`。把三個都 candidate 化。Phase 1（b55b2b6）：`axis_align_segments` → `axis_align_candidates` + `_accept_axis_align_candidates`。Per-segment 角度 gate + 簡單 batch apply；zero-length 用 `prune` candidate。Phase 2（3ec2628）：`truncate_overshoots` → `truncate_overshoot_candidates` + `_accept_truncate_overshoot_candidates`。第一次試「single-pass closest-trunk-wins」失敗（sg2 IOU 0.99 drop）、第二次試「index-order first-match」仍漂（sg2 IOU 0.99 + dN+1）——legacy 是 in-place mutation cascade，subsequent (i', end') 看得到前面 (i, end) 的 mutation；改成 generator 內部模擬 legacy 的 in-place mutation cascade（local `segs_sim` 副本）捕捉「最終座標」再以 batch candidate apply，bit-identical 通過。Phase 3（e369d0e）：`canonicalize_offsets` → `canonicalize_offset_candidates` + `_accept_canonicalize_offset_candidates`。Per-(type, axis) 1D cluster + 自適應 thickness tol + length-weighted **median**；`attach_thickness=True` 側通道交給 wrapper 後處理（apply_candidate 不會 add 新欄位）。Phase 4（637c8d0）：dead-code 清理（−212 行，含 canonical_line.py shrink 成「只剩 compute_local_thickness」）。**結果**：3 個 legacy case-specific call sites 全部 candidate-based；case-specific NO-OP 行為自然湧現（geometric gate 觸發不到就 emit 零 candidate、wrapper 直接 return 輸入）。剩下 legacy imperative 只有 `t_junction_snap` 和 `manhattan_force_axis`（全域 load-bearing、單一語意、候選化收益小）。|
+| **10** | **最後兩個 imperative pass** | ✅ **完成**（phase 1–3 全部結案，2026-05-12）| Phase 1（b9d0073）：`manhattan_force_axis` → `manhattan_force_axis_candidates` + `_accept_manhattan_force_axis_candidates`。Per-seg 獨立 transform（|dx|>=|dy|→H else V + perpendicular 縮到 midpoint）+ zero-length prune。一次過 PASS。Phase 2（ae8fde1）：`t_junction_snap` → `t_junction_snap_candidates` + `_accept_t_junction_snap_candidates`。Order-dependent in-place mutation cascade（跟 truncate_overshoots 同款）；generator 內部模擬 cascade、捕捉「最終座標」批次 apply。一次過 PASS bit-identical（step 9 phase 2 的經驗直接幫到忙）。Phase 3（6957cb0）：dead-code 清理（−66 行；含 helper `_point_on_axis_seg` 移到 generator 端 `_point_on_axis_seg_local`）+ ablation sync。**結果**：所有 13 個通用幾何優化 pass 都 candidate-based。剩下 imperative 只有 `segment_colors` / `skeletonize_mask` / `extract_branches` / `branches_to_segments`（pre-pipeline raster 層、operate on bitmap）+ `_resolve_src_path` / `draw_debug_image` 等 I/O，**這些不在 candidate 架構範圍內**。|
 | 5 | scoring + ranking model | ❌ 未開始 | 需要 30-50 張人工標註的 floorplan 才能訓練；跨 session 工作。step 6 + 7 全部 candidate 化完成、generator 種類齊全；訓練料蒐集是下一個瓶頸 |
 
 **Pipeline call site 變化**：31（起始估算）→ **17**（−45%）。4.9.5 驗證後確認 `snap_endpoints` / `snap_colinear_coords` 兩個都仍是 load-bearing、不能刪。4.9.7（post-ablation cleanup）砍 `manhattan_intersection_snap`（fresh ablation 確認 source/sg2 dN=0 IOU=1.000 pure NO-OP，4.9.2 canonical_line + 4.9.4 thickness-aware manhattan_t_project 把它的工作搶光了）。**Step 6 phase 1**（2026-05-12）：把 final `manhattan_ultimate_merge` 換成 candidate-based `_accept_merge_candidates` + `collinear_merge_candidates` generator（exact-line touching/overlapping、junction-aware、`delta >= 0` accept rule）；附帶修復 legacy 一個 bug——legacy 對 baseline JSON 內部 exact duplicate 不做去重（own_contribution counting quirk），且不檢查 wall-body / opening-body crossing（sg2 上一條 door 被誤合成跨越 wall body interior 的單段，新 generator 透過 score 的 `invalid_crossing` term 拒絕）；source 113→102（11 個 dup 條目去除）、sg2 128→126（3 dup + 1 door 保持 split），baseline 已 user-approved 更新到 PASS bit-identical。call site 數仍 17（換實作、未削減；phase 4 才合併 call site）。**Step 7 phase 1-6**（2026-05-12）：5 個 legacy snap pass 全部 candidate 化。`fuse_close_endpoints` / `manhattan_t_project` / `grid_snap_endpoints` / `snap_colinear_coords` / `snap_endpoints` → `_accept_fuse_candidates` / `_accept_t_project_candidates` / `_accept_2d_cluster_candidates`（3 個 generator 撐 5 個 call site）。重點：**沒接受 todo 原本「pre-canonical 暫緩」的妥協**，phase 4 / phase 5 直接挑戰 `snap_colinear_coords` 跟 `snap_endpoints`——phase 4 用 fuse generator + `masks=None` 通過 bit-identical；phase 5 一開始試 1D fuse generator 失敗（pre-canonical wall IOU drop ~18%）、馬上 revert 寫專屬 2D union-find cluster generator + 4-decimal rounding 通過 bit-identical。phase 6 砍 −283 行 legacy code。call site 仍 17（unification、不是 reduction），但 5 個 snap call sites 通過共用 generator 達成「全域統一」目標。
@@ -45,26 +46,26 @@
 **新模組**（todo 沒列、實際產生）：
 - [scoring.py](scoring.py) — score 函數
 - [candidates.py](candidates.py) — `Candidate` / `SpatialGate` / 三個 gates
-- [generators.py](generators.py) — 10 個 candidate generator：`proximal_bridge_candidates`（axis-bridge + L-bridge）、`collinear_merge_candidates`（step 6 phase 1）、`parallel_merge_candidates`（step 6 phase 3）、`endpoint_fuse_candidates`（step 7 phase 1）、`t_project_candidates`（step 7 phase 2）、`endpoint_cluster_2d_candidates`（step 7 phase 5）、`cluster_collinear_merge_candidates`（step 8 phase 1）、`axis_align_candidates`（step 9 phase 1）、`truncate_overshoot_candidates`（step 9 phase 2）、`canonicalize_offset_candidates`（step 9 phase 3）
+- [generators.py](generators.py) — **12 個 candidate generator**：`proximal_bridge_candidates`（axis-bridge + L-bridge）、`collinear_merge_candidates`（step 6 phase 1）、`parallel_merge_candidates`（step 6 phase 3）、`endpoint_fuse_candidates`（step 7 phase 1）、`t_project_candidates`（step 7 phase 2）、`endpoint_cluster_2d_candidates`（step 7 phase 5）、`cluster_collinear_merge_candidates`（step 8 phase 1）、`axis_align_candidates`（step 9 phase 1）、`truncate_overshoot_candidates`（step 9 phase 2）、`canonicalize_offset_candidates`（step 9 phase 3）、`manhattan_force_axis_candidates`（step 10 phase 1）、`t_junction_snap_candidates`（step 10 phase 2）
 - [canonical_line.py](canonical_line.py) — `compute_local_thickness`（thickness-aware tol 用，step 4.9.2；canonicalize_offsets 在 step 9 phase 3 移到 generators.py + vectorize.py 並刪除舊版）
 
 ---
 
 ## 給下個 session 的交接（**先讀這節**）
 
-**當前 HEAD = `637c8d0`**（refactor: step 9 phase 4 -- dead-code cleanup of legacy case-specific passes）。Source / sg2 都 PASS bit-identical。Pipeline call site 17。
+**當前 HEAD = `6957cb0`**（refactor: step 10 phase 3 -- dead-code cleanup of last two imperative passes）。Source / sg2 都 PASS bit-identical。Pipeline call site 17。**所有 13 個通用幾何優化 pass 全部 candidate-based**（candidate 支柱完成）。
 
-**最近 step 9 session 做的 4 個 commit**：
-- `637c8d0` step 9 phase 4：刪 3 個 legacy case-specific 函式 + helpers（−212 行）+ ablation sync
-- `e369d0e` step 9 phase 3：`canonicalize_offsets` → `_accept_canonicalize_offset_candidates`（含 `attach_thickness` 側通道）
-- `3ec2628` step 9 phase 2：`truncate_overshoots` → candidate-based（generator 內部模擬 legacy in-place mutation cascade 捕捉「最終座標」、batch apply 達 bit-identical）
-- `b55b2b6` step 9 phase 1：`axis_align_segments` → `_accept_axis_align_candidates`（含 prune 零長度）
+**最近 step 10 session 做的 3 個 commit**：
+- `6957cb0` step 10 phase 3：刪 `t_junction_snap` / `manhattan_force_axis` / `_point_on_axis_seg`（−66 行）+ ablation sync
+- `ae8fde1` step 10 phase 2：`t_junction_snap` → candidate-based（in-place mutation cascade simulation，step 9 phase 2 模式直接複用、一次過 PASS）
+- `b9d0073` step 10 phase 1：`manhattan_force_axis` → candidate-based（簡單 per-seg transform）
 
-**Step 8 session 的 commit（之前）**：
-- `8f14841` step 8 wrap-up docs
-- `6ab558b` step 8 phase 4：刪 3 個 legacy merge 函式 + helpers
-- `752176c` step 8 phase 3：第二個 early merge_collinear → candidate-based
-- `bf3044a` step 8 phase 1+2：寫 `cluster_collinear_merge_candidates`、踩到兩個雷（output 順序、Python 3.12 `sum()` Neumaier）並修復
+**Step 9 session 的 commit（之前）**：
+- `2706123` step 9 wrap-up docs
+- `637c8d0` step 9 phase 4：刪 3 個 legacy case-specific 函式 + helpers
+- `e369d0e` step 9 phase 3：`canonicalize_offsets` → candidate-based（含 `attach_thickness` 側通道）
+- `3ec2628` step 9 phase 2：`truncate_overshoots` → candidate-based（cascade simulation 發明者）
+- `b55b2b6` step 9 phase 1：`axis_align_segments` → candidate-based
 
 **Step 7 session 的 commit（之前）**：
 - `acf315e` step 7 phase 5：snap_endpoints → endpoint_cluster_2d_candidates
@@ -73,7 +74,7 @@
 - `cd85cce` step 7 phase 2：manhattan_t_project → t_project_candidates
 - `bef6fd1` step 7 phase 1：fuse_close_endpoints → endpoint_fuse_candidates
 
-**架構基礎建設已備好可重用**（在 `vectorize.py` ~1870-2200）：
+**架構基礎建設已備好可重用**（在 `vectorize.py` ~1870-2270）：
 - `_run_merge_loop(lines, regenerate, sort_key, skip_score, …)` — 通用 fixed-point accept loop
 - `_accept_merge_candidates(perp_tol, gap_tol, junction_aware, …)` — collinear/touching 模式（step 6 phase 1）
 - `_accept_parallel_merge_candidates(perp_tol, touch_perp_tol, min_overlap_ratio, …)` — parallel duplicates 模式（step 6 phase 3）
@@ -84,14 +85,27 @@
 - `_accept_axis_align_candidates(tol_deg)` — per-segment 軸對齊（step 9 phase 1）
 - `_accept_truncate_overshoot_candidates(tol)` — generator 內部 mutation simulation（step 9 phase 2）
 - `_accept_canonicalize_offset_candidates(wall_mask, attach_thickness, …)` — per-bucket offset cluster + 自適應 thickness tol + length-weighted median + attach_thickness 側通道（step 9 phase 3）
-- `candidates.Candidate(op="merge"|"fuse"|"t_project"|"cluster_2d"|"bridge"|"axis_align"|"truncate"|"canonical_offset"|"prune"|…, add, remove, mutate, meta)` — 共用 dataclass
+- `_accept_manhattan_force_axis_candidates()` — per-seg 強制 Manhattan + perpendicular midpoint collapse（step 10 phase 1）
+- `_accept_t_junction_snap_candidates(tol)` — endpoint snap to orthogonal trunk body + generator cascade simulation（step 10 phase 2）
+- `candidates.Candidate(op="merge"|"fuse"|"t_project"|"cluster_2d"|"bridge"|"axis_align"|"truncate"|"canonical_offset"|"force_axis"|"t_junction_snap"|"prune"|…, add, remove, mutate, meta)` — 共用 dataclass
+
+**四個支柱目前狀態**：
+
+| 支柱 | 狀態 | 備註 |
+|---|---|---|
+| 1. Evidence | ⚠️ 半 OK | `compute_wall_evidence` 寫了，fixed threshold 0.5，不是連續 evidence map；`segment_colors` 仍走單一 HSV+Otsu binary mask |
+| 2. Candidate | ✅ **完成**（step 10 結束） | 13 個通用 pass + 4 個 step-4 era pass，全部 candidate-based |
+| 3. Score | ⚠️ 有 bug | `junction` term 對厚牆雙脊線會誤判（step 6 phase 3 已記錄）；多數 wrapper 用 `skip_score=True` 繞過、score 沒實際把關 |
+| 4. Audit | ❌ 完全沒做 | 沒有 reject → low-score region → 增量標註 → retrain 的閉環 |
 
 **下次接著做什麼（按優先順序）**：
 
-1. **step 5 — ranking model + 標註集**。step 6 / 7 / 8 / 9 全部完成，11 個 legacy 通用 pass 都已 candidate 化、generator 種類齊全（merge × 3、fuse、t_project、cluster_2d、bridge、axis_align、truncate、canonical_offset、外加既有的 brute_force_ray / insert_connectors / t_snap_with_extension）。瓶頸是 30-50 張人工標註
-2. **剩下的 legacy imperative pass**：`t_junction_snap`（min IOU 0.81 on sg2 ablation）跟 `manhattan_force_axis`（min IOU 0.66、max|dN|=45 三張都強影響）。**兩個都是全域 load-bearing、語意單一**（前者：將斷線端點 snap 到 trunk body；後者：把任意角度 segment 強制 90°/180°）。它們的「case-specific」收益小（沒有「修 A 壞 B」化石的問題），但為了「全域統一」可以候選化、屬於 polish 工作
-3. **Gemini un-skip + baseline 更新** — step 4.7-4.8 後 Gemini 輸出跟舊 baseline 大幅漂移，free 從 54 改到 35 是改善、但需要視覺確認再更新 baseline
-4. **`brute_force_ray` 跟 `insert_connectors` 跟 `t_snap_with_extension` 再檢視** — step 4 era 寫的 candidate-based，但實作風格較舊（沒有走 `_run_merge_loop` infrastructure）；可選的 polish 機會把它們抽到統一 wrapper 模式
+1. **Score 支柱修一下** — 給 `junction` term 加 thick-wall awareness（採樣牆厚區分真假 T-junction），讓 `skip_score=True` 的 wrapper（phase 3 parallel_merge、step 7/8/9/10 大部分 case-specific）可以改用嚴格 score gate。預估 4-6h
+2. **Evidence 支柱補完** — 把 `segment_colors` 的單一 HSV+Otsu 改成 multi-detector + 連續 evidence map（todo 原 step 3 計劃但只半完成）。預估 6-10h
+3. **Audit 支柱開工** — 寫 audit dump 工具（candidate accept/reject 帶 delta_terms 落地、可視化）。Step 5 ranking model 需要 audit 作為訓練資料 pipeline 的前置條件。預估 4-8h
+4. **step 5 — ranking model + 標註集** — 上面三個做完才有意義。30-50 張人工標註是硬瓶頸
+5. **Gemini un-skip + baseline 更新** — step 4.7-4.8 後 Gemini 輸出跟舊 baseline 大幅漂移，需要視覺確認
+6. **`brute_force_ray` / `insert_connectors` / `t_snap_with_extension` polish** — step 4 era 寫的 candidate-based，但實作風格較舊（沒走 `_run_merge_loop`）；可選的 polish 機會抽到統一 wrapper 模式
 
 **下次開工前的 checklist**：
 1. `git log --oneline -10` 看最近狀態
@@ -121,10 +135,13 @@
 | ✅ 完成 | ~~**step 7 — Snap family unification**~~ | **完整完成（2026-05-12，phase 1-6 全部 PASS bit-identical）**。Phase 1（bef6fd1）：`fuse_close_endpoints` → `endpoint_fuse_candidates` + `_accept_fuse_candidates`，1D wall-priority cluster、thickness-aware、`skip_score=True`。Phase 2（cd85cce）：`manhattan_t_project` → `t_project_candidates` + `_accept_t_project_candidates`，per-endpoint mutate + `used_endpoints` set 模擬 legacy single-pass。Phase 3（aa72e52）：`grid_snap_endpoints` 改 call phase 2 wrapper（`masks=None`），兩個 legacy pass 共一 generator。Phase 4（d19e4ec）：`snap_colinear_coords` 改 call phase 1 wrapper（`masks=None`），pre-canonical 也成功；**突破 todo 原本「pre-canonical 不要嘗試」的禁忌**——關鍵是 `skip_score=True`，避開 score 信號雜訊。Phase 5（acf315e）：`snap_endpoints` 試 phase 1 wrapper 大幅 regression（1D rect vs 2D circ tol 在 pre-canonical 差別發酵）→ revert + 寫專屬 `endpoint_cluster_2d_candidates`（union-find + 4-decimal rounding 收尾）。Phase 6（60ecbb5）：dead-code 清理（−283 行），ablation harness sync。**結果**：5 個 legacy snap call sites 全部 candidate-based、共用 3 個 generator（endpoint_fuse / t_project / cluster_2d）。call site 數仍 17、但全域通用 by 共用 generator 達成。|
 | ✅ 完成 | ~~**step 8 — early `merge_collinear` 兩個 call**~~ | **完整完成（2026-05-12，phase 1-4 全部 PASS bit-identical）**。step 6 phase 2 deferred 的兩個 pre-canonical merge call。Phase 1（bf3044a 一部分）：寫 `cluster_collinear_merge_candidates` cluster-based generator（不是 pair-based），1 candidate per along-group + non-loop wrapper（diagonals + emit-order assembly），對齊 legacy 順序給下游 `t_junction_snap` / `truncate_overshoots`。Phase 2（同 commit）：migrate 第一個 call、踩到 Python 3.12 `sum()` Neumaier vs `+=` 1 ULP 雷、改用 `sum(...)` 對齊。Phase 3（752176c）：migrate 第二個 call。Phase 4（6ab558b）：刪 3 個 legacy 函式（`merge_collinear` / `manhattan_ultimate_merge` / `cluster_parallel_duplicates` + helpers，−278 行）+ ablation sync。**結果**：4 個 legacy merge call sites 全部 candidate-based（step 6 phase 1 + 3、step 8 phase 2 + 3），3 個 generator 撐 4 個 call site。call site 仍 17（unification 不是 reduction）。|
 | ✅ 完成 | ~~**step 9 — case-specific 條件式 pass 三個**~~ | **完整完成（2026-05-12，phase 1-4 全部 PASS bit-identical）**。ablation 中 6 個 case-specific（某張圖 NO-OP）裡 3 個還是 legacy。**重要發現**：case-specific 不是「化石」、是 conditional behavior（geometric gate 觸發不到就 NO-OP）。Phase 1（b55b2b6）：`axis_align_segments`，per-seg 角度 gate + batch apply + 零長度 prune。Phase 2（3ec2628）：`truncate_overshoots`，legacy 是 order-dependent in-place mutation cascade（subsequent (i', end') 看到前面 (i, end) 的 mutation 結果）；generator 內部模擬這個 cascade（local segs_sim 副本）捕捉每個 endpoint 的「最終座標」、以 batch candidate apply 達 bit-identical。第一試「single-pass closest-trunk」+ 第二試「index-order first-match」都漂、第三才對。Phase 3（e369d0e）：`canonicalize_offsets`，per-(type, axis) 1D offset cluster + 自適應 thickness tol + length-weighted median；`attach_thickness=True` 側通道在 wrapper 後處理（apply_candidate 不會 add 新欄位）。Phase 4（637c8d0）：dead-code 清理（−212 行，canonical_line.py shrink 到只剩 `compute_local_thickness`）+ ablation sync。**結果**：3 個 legacy case-specific call sites 全部 candidate-based。剩下 legacy imperative 只剩 `t_junction_snap` 跟 `manhattan_force_axis`。|
-| **1** | **step 5 — ranking model + 標註集** | step 6 / 7 / 8 / 9 全部完成、candidate generator 種類齊全（merge × 3 / fuse / t_project / cluster_2d / bridge / axis_align / truncate / canonical_offset / brute_force_ray / insert_connectors / t_snap_with_extension），train 出來的 model 才能學到有意義的 accept 分佈。瓶頸：30-50 張人工標註 |
-| 2 | **剩下兩個 legacy imperative pass** | `t_junction_snap`（min IOU 0.81 on sg2，全域 load-bearing）跟 `manhattan_force_axis`（min IOU 0.66 / max|dN|=45 三張都強影響）。語意單一、case-specific 收益小、為「全域統一」可以候選化、屬於 polish 工作 |
-| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定 |
-| 後 | 把 `door_window_to_segments` 從 git history 拿回重試 step 2 | 不建議（skeleton path 已驗證對 source/sg2 topology 是對的）|
+| ✅ 完成 | ~~**step 10 — 最後兩個 imperative pass**~~ | **完整完成（2026-05-12，phase 1-3 全部 PASS bit-identical）**。Phase 1（b9d0073）：`manhattan_force_axis`，per-seg 獨立 transform（|dx|>=|dy|→H else V + perp midpoint），一次過 PASS。Phase 2（ae8fde1）：`t_junction_snap`，跟 truncate_overshoots 同款 in-place mutation cascade；generator 內部 simulate（step 9 phase 2 經驗直接複用），一次過 PASS bit-identical。Phase 3（6957cb0）：刪 `t_junction_snap` / `manhattan_force_axis` / `_point_on_axis_seg` 三個 legacy 函式（−66 行）+ ablation sync。**結果**：candidate 支柱**完成**——所有 13 個通用幾何優化 pass 全部 candidate-based。剩下 imperative 只有 raster-level pre-pipeline（`segment_colors` / skeleton extraction）跟 I/O，不在 candidate 架構範圍內。|
+| **1** | **Score 支柱修一下（補非候選支柱）** | 給 `junction` term 加 thick-wall awareness。多數 candidate wrapper 用 `skip_score=True` 繞過 score（從 step 6 phase 3 起）——score 沒實際把關。要做的：採樣牆厚區分「真 T-junction」跟「skeleton ridge artifact」；估時 4-6h |
+| 2 | **Evidence 支柱補完** | `segment_colors` 走單一 HSV+Otsu binary mask；`compute_wall_evidence` 寫了但 fixed threshold 0.5，不是連續 evidence。改成 multi-detector + 連續 evidence map（todo 原 step 3 計劃只半完成）。估時 6-10h |
+| 3 | **Audit 支柱開工** | 候選 accept/reject 帶 delta_terms 落地、可視化。Step 5 ranking model 的訓練資料 pipeline 前置。估時 4-8h |
+| 4 | **step 5 — ranking model + 標註集** | 1/2/3 做完才有意義。瓶頸：30-50 張人工標註 |
+| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認 |
+| 後 | 把 `door_window_to_segments` 從 git history 拿回重試 step 2 | 不建議（skeleton path 已驗證）|
 
 **容易踩的雷（從這次經驗加上的）**：
 - `apply_candidate` 的 remove+add 跟 batch accept loop 有 index-shift 衝突——這是 macro candidate 不能直接做的根因。要做的話需要 single-accept-then-regenerate 模式
