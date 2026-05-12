@@ -40,15 +40,18 @@
 - `feedback_baseline_update_protocol.md` — baseline 更新前必須先給用戶看 overlay 並明確徵詢，不要用 `--yes` 自動更新
 - `project_step2_baseline_shift.md` — step 2 漂移歷史記錄（step 2 後來被 revert，這份 memory 部分過時）
 
-**接下來什麼最該做**（更新於 step 4.9.2 完成後）：
+**接下來什麼最該做**（更新於 step 4.9.7 完成後）：
+
+> **方向確定**：脫離「個案 pass 改 A 壞 B」、轉向「全域通用 candidate generator」。Step 5（ranking model）刻意放最後——它解 candidate accept 決策品質、不解 pipeline 形狀，要先把 pipeline 形狀整理乾淨、generator 種類齊全，model 才有足夠 candidate 類別可學。標準錨點：source / sg2（不以 Gemini 為調校依據）。
 
 | 順序 | 選項 | 評估 |
 |---|---|---|
-| **1** | **step 4.9.3-4.9.6** — 補完 canonical_line 配套 | `local_thickness` 持久化欄位、thickness-aware snap_tol（`manhattan_t_project` / `manhattan_intersection_snap` / `fuse_close_endpoints`）、gap closing stroke_width compatibility。預估 2-3h |
-| 2 | **step 5 — ranking model + 標註集** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註。canonical_line 已穩定，可開始標註 |
-| 後 | collapse_collinear_walls_generator | 再 −1 call site；純架構；非緊迫 |
+| **1** | **step 6 — Merge family unification**（提議）| 把 `merge_collinear ×2`、`cluster_parallel_duplicates`、`manhattan_ultimate_merge` 統一成一個 `merge_candidates` generator。共同語意：「兩條同類 segment 摺成一條」。fresh ablation 顯示 `merge_collin_1`、`cluster_parallel` 都是高影響（IOU 0.72-0.93），`merge_collin_2`、`manhattan_merge_4` 邊際；現狀是 4 個 call site 散在 pipeline 不同位置、各帶不同 tol 隱式依賴。統一後 4→1，且 merge 行為由 score 控制。預估 4-6h |
+| **2** | **step 7 — Snap family unification**（提議）| 把 `snap_colinear_coords`（IOU 0.28，最關鍵 load-bearing）、`snap_endpoints`、`grid_snap_endpoints`、`manhattan_t_project`、`fuse_close_endpoints` 統一成 1-2 個 `snap_candidates` generator。共同語意：「endpoint 投影到 canonical line」。6 個 call site → 1-2 個。徹底解 4.9.5 那種「停一個就大壞」的隱式依賴。預估 6-10h。**需在 step 6 完成後再進**（兩家族互相牽動）|
+| 3 | **case-specific pass 檢視** | fresh ablation 找出三張圖影響不一致的 pass：`truncate_overshoots`（sg2 only：IOU 1.00/0.82/0.95）、`insert_connectors`（Gemini 偏向：dN -6/-7/-12）、`snap_endpoints_1`（source NO-OP、其他 0.80）——這些是「修 A 壞 B」的化石，要評估是改 generator 化還是純刪 |
+| 4 | **step 5 — ranking model + 標註集** | 真正解 Gemini 級問題的關鍵；瓶頸是 30-50 張人工標註。在 step 6 + 7 完成後（candidate generator 種類齊全），train 出來的 model 才能學到有意義的 accept 分佈 |
+| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定。建議在 step 6 / 7 完成後再評估，因為 Gemini 是 candidate-rich 場景、最能受益於統一 generator |
 | 後 | 把 `door_window_to_segments` 從 git history 拿回重試 step 2 | 不建議（skeleton path 已驗證對 source/sg2 topology 是對的）|
-| 後 | Gemini un-skip + baseline 更新 | 需要視覺確認新輸出（free 35 已比舊 baseline 的 54 好），用戶決定 |
 
 **容易踩的雷（從這次經驗加上的）**：
 - `apply_candidate` 的 remove+add 跟 batch accept loop 有 index-shift 衝突——這是 macro candidate 不能直接做的根因。要做的話需要 single-accept-then-regenerate 模式
