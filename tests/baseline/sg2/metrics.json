@@ -6,7 +6,7 @@
     2048,
     2048
   ],
-  "hash": "4f8dbcf21bf5858de775329a6cbd6d8f45f08ca3",
+  "hash": "641bbbbb066243dc4014477040c88efb9944d2e2",
   "graph": {
     "num_segments": 128,
     "count_by_type": {
@@ -17,8 +17,8 @@
     "free_endpoints": 23,
     "num_short_segments": 0,
     "total_length_by_type": {
-      "wall": 17260.0,
-      "window": 2166.0,
+      "wall": 17351.0,
+      "window": 2141.0,
       "door": 1684.0
     }
   },
@@ -44,6 +44,6 @@
       "loose": "door_loose.png"
     }
   },
-  "baseline_updated_at": "2026-05-11T17:23:46",
+  "baseline_updated_at": "2026-05-12T10:10:39",
   "baseline_updated_by": "manual_yes_flag"
 }

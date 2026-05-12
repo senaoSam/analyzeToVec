@@ -25,8 +25,8 @@
 **Pipeline call site 變化**：31（起始估算）→ **17**（−45%）
 
 **Regression 狀態（收工）**：
-- source: **FAIL（待 user 視覺確認）** — wall normal IOU drop 2.7%、wall loose IOU drop 1.6%。實際差異是 ~0.1 px x-coord 漂移 across all walls（canonical convergence 收斂在略不同的位置）+ 消除 1 個明顯 duplicate wall（baseline 的 375.0,724.9→375.0,749.2 完全包含在 375.0,585.0→375.0,749.2 內）；overlay 視覺差幾乎為零、僅一條極短紅色 wall segment。segs 117→113（-4，主要是 duplicate / contained 移除）、free 11→12（+1）
-- sg2: **FAIL（待 user 視覺確認）** — wall normal IOU drop 3.1%、door normal IOU drop 5.3%（單一 door x 從 1148.6→1150.1，shift 1.5 px）、window loose IOU drop 1.1%（window 端點 y 從 1325.0→1299.7）。canonical 位置漂移 0.1-1.5 px；多 1 個 horizontal wall (356.8, 777.2)→(477.2, 777.2)、少 1 個 4.9.6 已移除的 contained wall (356.8, 1264.6→1325.0)。overlay 視覺差幾乎為零。segs 128→128、free 23→23
+- source: **PASS bit-identical**（step 4.9.4 baseline 已 user-approved 更新）。segs 117→113（baseline JSON 內部 duplicate 條目從 21 變 18：同條 wall 寫兩次的去重）、free 11→12（+1，duplicate 消掉後曝光的 loose end）
+- sg2: **PASS bit-identical**（step 4.9.4 baseline 已 user-approved 更新）。segs 128→128。實際內部差異：3 處 1.5 px canonical-x 收斂偏移（x=1148.6→1150.1 的 wall/door 三段一起收）+ 2 處 baseline 去重（step 4.9.6 的 contained wall (356.8, 1264.6→1325.0) + (1380.8, 857→913) x2 變 x1）+ 1 處 window/wall topology 修復（baseline 中 window y=1119→1325 跟 wall y=1300→1325 重疊，current 把 window 縮到 y=1299.7、不再重疊）+ 2 處多 1 個 contained-segment entry（視覺零影響）
 - Gemini_Generated: **skip=true**（manifest 設定）。step 4.7-4.8 之後輸出跟 step 2 era baseline 大幅漂移（free 54→35 改善了、但 wall IOU 0.69 表示位置漂得多），未做視覺確認 + baseline update
 
 **新模組**（todo 沒列、實際產生）：
