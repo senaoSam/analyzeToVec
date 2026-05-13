@@ -1090,11 +1090,65 @@ def _accept_bridge_candidates(lines: List[Dict],
     return current
 
 
+# ---------------------------------------------------------------------------
+# Score-gate policy: three classes
+# ---------------------------------------------------------------------------
+#
+# Every candidate-based pass falls into one of three classes that determine
+# its score-gate policy. Adopted post-step-15 to make the architecture
+# seam (score is local-decision, pipeline is global-recovery; see
+# step 15 diagnostic in todo.md) an explicit framework instead of an
+# ad-hoc per-call decision.
+#
+#   Class A — pure simplification
+#     The candidate folds redundancy without changing what the JSON
+#     renders to (e.g. two collinear touching segments become one).
+#     ``delta`` is typically 0 because the score's positive merge
+#     signals (``duplicate``, ``free_endpoint``) target body-overlap
+#     or loose-end merges and don't reward touching-only clean-up.
+#     Policy: ``delta >= 0`` accept (tie = accept on score-neutral
+#     simplification). Score still acts as safety net for any
+#     candidate that *would* regress.
+#     Examples: ``_accept_merge_candidates`` (touching-collinear),
+#               ``_accept_cluster_collinear_merge_candidates``
+#               (cluster-based merge_collinear).
+#
+#   Class B — topology-recovery primitive
+#     The candidate's standalone effect can look like a regression
+#     to local score (destroys a T-junction, or moves an endpoint
+#     sub-pixel) because the pipeline relies on a downstream pass
+#     to recover the lost structure. Step 15 quantified this for
+#     parallel_merge (mean junction delta -1.15 to -1.28 across
+#     ~100 rejected candidates) and confirmed via monkey-patch that
+#     letting score gate these *does* drop wall IOU by 3-27%.
+#     Policy: ``skip_score=True`` permanent. Geometric gate is the
+#     entire safety net. The wrapper still computes & records score
+#     for audit signal so future ranking work has the data.
+#     Examples: ``_accept_parallel_merge_candidates``,
+#               ``_accept_fuse_candidates``.
+#
+#   Class C — destructive mutation
+#     A pass that can move a *real* T-junction node, or change
+#     cross-type topology (e.g. attach a wall to a door body in
+#     a way that would change how the door anchors). No such pass
+#     currently exists; this slot is reserved so future generators
+#     are evaluated against it explicitly.
+#     Policy: ``skip_score=True`` NEVER. Must pass score gate.
+#     If a new generator naturally lands in this class, score
+#     must be made strict enough to gate it correctly.
+#
+# Migration rule: when adding a new candidate-based pass, classify it
+# *before* picking a score policy. Don't reach for ``skip_score=True``
+# because the regression looks easier with it -- check first whether
+# the pass actually fits Class B (downstream recovery, not local
+# correctness).
+
+
 def _run_merge_loop(lines: List[Dict],
                     *,
                     regenerate,           # callable(segments) -> List[Candidate]
                     sort_key=None,        # callable(Candidate) -> sortable
-                    skip_score: bool = False,  # if True, accept all candidates the generator emits
+                    skip_score: bool = False,  # Class B (topology-recovery): True. Class A (pure simplification): False with delta >= 0 in the merge wrappers below.
                     wall_evidence: np.ndarray = None,
                     door_mask: np.ndarray = None,
                     window_mask: np.ndarray = None,
@@ -1183,29 +1237,28 @@ def _accept_merge_candidates(lines: List[Dict],
                              ) -> List[Dict]:
     """Run ``generators.collinear_merge_candidates`` to a fixed point.
 
-    Each iteration regenerates candidates against the current state, ranks
-    them by (smallest perp_dist, longest merge), and accepts each whose
-    pipeline-score delta is **non-negative** (``>= 0``).
+    **Score-gate class: A (pure simplification).** See the framework
+    block above ``_run_merge_loop``. Accepts on ``delta >= 0``;
+    tie-accept is correct because:
 
-    Why ``>= 0`` (rather than the ``> 0`` used by every other candidate
-    pass): a merge candidate is a pure simplification — two collinear
-    touching segments fold into one rendering identically. The score
-    function's only positive signals for this are (a) the ``duplicate``
-    term (which only counts body-overlapping pairs, missing the
-    touching-only case) and (b) the ``free_endpoint`` term (which only
-    fires when the merge merges loose ends, again missing the
-    interior-touch case). Clean touching-merges therefore score
-    delta=0, which the strict ``> 0`` rule would reject. We accept on
-    tie because the generator's gates already guarantee the candidate
-    is structurally safe (same axis, junction-aware filter rejects
-    T-junction destruction). Score is the *safety net*, not the
-    primary decision: a merge that would destroy a real junction shows
-    delta < 0 via the ``junction`` term and falls through.
+      - Two collinear touching segments folding into one renders
+        identically (the JSON change is pure simplification).
+      - The score's positive merge signals — ``duplicate`` (only
+        counts body-overlapping pairs, missing the touching case)
+        and ``free_endpoint`` (only fires when loose ends merge,
+        missing the interior-touch case) — produce ``delta = 0``
+        on clean touching-merges. The strict ``> 0`` rule would
+        reject these benign simplifications.
+      - The generator's geometric gates already guarantee structural
+        safety (same axis + junction-aware filter). Score acts as
+        safety net only: a merge that would destroy a real
+        T-junction shows ``delta < 0`` via the ``junction`` term
+        and the gate catches it.
 
-    Greedy with regenerate: each accepted merge changes the segment
-    list; rather than try to invalidate-and-keep, we re-run the
-    generator. For our typical ~150-segment inputs this terminates in
-    1-3 passes (linear in chain length).
+    Iteration: each pass regenerates candidates against current
+    state, sorts by (smallest perp_dist, longest merge), and accepts
+    the first that passes the gate. Terminates in 1-3 passes for
+    ~150-segment inputs (linear in chain length).
     """
     import generators as G
     return _run_merge_loop(
@@ -1240,11 +1293,24 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     """Step 6 phase 3: run ``generators.parallel_merge_candidates`` to a
     fixed point. Replaces ``cluster_parallel_duplicates``.
 
-    Same accept rule (``delta >= 0``) and single-accept-then-regenerate
-    pattern as the phase-1 collinear loop. Sort prefers Case-1 (touching
-    near-collinear) over Case-2 (thick-wall parallel duplicate), then
-    tighter perp_dist, then longest merge: the tightest /genuine-ist
-    merges land first so subsequent iterations see the cleanest state.
+    **Score-gate class: B (topology-recovery primitive)** when the
+    pipeline calls this with ``skip_score=True`` (the default
+    production wiring; see vectorize_bgr). Step 15 diagnostic
+    confirmed: ~99/115 source and ~138/150 sg2 parallel-merge
+    candidates would be score-rejected with mean ``junction`` term
+    -1.15 to -1.28; letting score gate them drops wall IOU 3-27%
+    because the lost T-junctions are restored by downstream
+    t_project / fuse. The geometric gates (same-type, same-axis,
+    perp_tol, min_overlap_ratio) are the entire safety net.
+
+    ``skip_score`` is a parameter (not hard-coded True) so the
+    same wrapper can serve a future Class-A use that finds a
+    score-gateable parallel-merge subset, without forking code.
+
+    Iteration: single-accept-then-regenerate. Sort prefers Case-1
+    (touching near-collinear) over Case-2 (thick-wall parallel
+    duplicate), then tighter perp_dist, then longest merge — the
+    cleanest / most-genuine merges land first.
     """
     import generators as G
     return _run_merge_loop(
@@ -1685,26 +1751,28 @@ def _accept_fuse_candidates(lines: List[Dict],
                              ) -> List[Dict]:
     """Step 7 phase 1: candidate-based ``fuse_close_endpoints``.
 
-    Runs ``generators.endpoint_fuse_candidates`` to a fixed point. Each
-    candidate is one 1D cluster's worth of mutates — the cluster
-    definition (sort-and-walk on each of x and y independently with the
-    pairwise min thickness-aware tol as join threshold, wall-priority
-    mean as canonical) matches legacy ``fuse_close_endpoints`` exactly.
+    **Score-gate class: B (topology-recovery primitive).** See the
+    framework block above ``_run_merge_loop``. ``skip_score=True``
+    hard-coded below for the same architectural reason as
+    parallel_merge: sub-2-px endpoint mutations make integer-count
+    score terms (``free_endpoint`` / ``junction`` / ``pseudo_junction``)
+    jitter in ways that reject benign clusters (step 11 evaluation:
+    enabling score gate drops source wall IOU 3%). The geometric gate
+    (1D wall-priority cluster within tol, identical to legacy) is the
+    entire safety net.
 
-    ``skip_score=True``: legacy fuse applies every cluster unconditionally
-    — its safety net is the geometric gate (within tol, wall-priority
-    anchor). The score's snap-relevant signals (``free_endpoint``,
-    ``junction``, ``pseudo_junction``) are integer-count terms that
-    typically don't move on a sub-2-px endpoint mutation, so a strict
-    ``delta >= 0`` gate would either accept every candidate anyway or
-    reject benign ones on score noise. Trust the gates the way phase 3
-    parallel-merge does.
+    Runs ``generators.endpoint_fuse_candidates`` to a fixed point.
+    Each candidate is one 1D cluster's worth of mutates — the
+    cluster definition (sort-and-walk on each of x and y
+    independently with the pairwise min thickness-aware tol as join
+    threshold, wall-priority mean as canonical) matches legacy
+    ``fuse_close_endpoints`` exactly.
 
-    ``seg_tols`` is computed once up front against the *input* segments,
-    mirroring legacy (which also computes it once before mutating). The
-    accept loop's mutates only move endpoint coords — they don't change
-    segment identity — so the per-segment thickness sampled from the
-    distance transform stays valid across iterations.
+    ``seg_tols`` is computed once up front against the *input*
+    segments, mirroring legacy. Fuse only mutates endpoint coords
+    (never adds / removes segments), so the per-segment thickness
+    sampled from the distance transform stays valid across
+    iterations.
     """
     import generators as G
     if not lines:
