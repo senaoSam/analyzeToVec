@@ -25,6 +25,9 @@ import numpy as np
 
 import vectorize as V
 
+# Step 18: metric + invariant layer. Imported lazily inside ``run_one_case``
+# to avoid forcing tests/ on the sys.path for callers that don't need it.
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -249,14 +252,20 @@ def resolve_input_image(case: str, manifest: Dict) -> str:
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
-def run_pipeline_pure(image_path: str) -> Tuple[List[Dict], Tuple[int, int], np.ndarray]:
-    """cv2.imread -> vectorize_bgr(bgr) -> (lines, shape, wall_mask)."""
+def run_pipeline_pure(image_path: str) -> Tuple[List[Dict], Tuple[int, int], np.ndarray, np.ndarray]:
+    """cv2.imread -> vectorize_bgr(bgr) -> (lines, shape, wall_mask, bgr).
+
+    Returns the BGR image alongside the pipeline output so callers can
+    feed it back into step-18 metric computation without re-reading the
+    file. Wall mask is kept as a separate return for back-compat with
+    existing callers that only need stroke-width estimation.
+    """
     bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if bgr is None:
         raise SystemExit(f"cannot read image: {image_path}")
     result = V.vectorize_bgr(bgr, verbose=False)
     masks = V.segment_colors(bgr)
-    return result["lines"], bgr.shape[:2], masks.get("wall")
+    return result["lines"], bgr.shape[:2], masks.get("wall"), bgr
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +563,27 @@ def print_report(report: Dict) -> None:
         print(f"  {t:6s}  thin={iou.get('thin', float('nan')):.4f}  "
               f"normal={iou.get('normal', float('nan')):.4f}  "
               f"loose={iou.get('loose', float('nan')):.4f}")
+    v18 = report.get("v18")
+    if v18:
+        cm = v18["current_metrics"]
+        bm = v18["baseline_metrics"]
+        print(f"  v18 wall_iou_vs_source:   "
+              f"{bm.get('wall_iou_vs_source', float('nan')):.4f} -> "
+              f"{cm.get('wall_iou_vs_source', float('nan')):.4f}")
+        print(f"  v18 door_iou_vs_source:   "
+              f"{bm.get('door_iou_vs_source', float('nan')):.4f} -> "
+              f"{cm.get('door_iou_vs_source', float('nan')):.4f}")
+        print(f"  v18 window_iou_vs_source: "
+              f"{bm.get('window_iou_vs_source', float('nan')):.4f} -> "
+              f"{cm.get('window_iou_vs_source', float('nan')):.4f}")
+        print(f"  v18 phantom_wall_frac:    "
+              f"{bm.get('phantom_wall_frac', float('nan')):.4f} -> "
+              f"{cm.get('phantom_wall_frac', float('nan')):.4f}")
+        print(f"  v18 invariants: strict={v18['invariants']['strict_count']}  "
+              f"goal={v18['invariants']['goal_count']}")
+        print(f"  v18 floating_openings:    "
+              f"{bm.get('floating_openings', 0)} -> "
+              f"{cm.get('floating_openings', 0)}")
     if report["warn_reasons"]:
         print("  WARN:")
         for r in report["warn_reasons"]:
@@ -610,7 +640,7 @@ def run_one_case(case: str) -> Tuple[Dict, List[Dict], Tuple[int, int], float]:
     if not os.path.isfile(image_path):
         raise SystemExit(f"image not found for case {case!r}: {image_path}")
 
-    lines, shape, wall_mask = run_pipeline_pure(image_path)
+    lines, shape, wall_mask, bgr = run_pipeline_pure(image_path)
     stroke_width: float
     if baseline_exists(case):
         base_metrics_path = baseline_paths(case)["metrics"]
@@ -662,10 +692,36 @@ def run_one_case(case: str) -> Tuple[Dict, List[Dict], Tuple[int, int], float]:
         return skeleton, lines, shape, stroke_width
 
     report = compare_case(case, lines, shape)
+
+    # Step 18: layer the metric + invariant report on top. STRICT invariant
+    # violations are unconditional FAIL (no tolerance). GOAL invariant
+    # violations are reported but do not fail the gate until §2/§3 ship —
+    # they would all fire right now and hide real regressions.
+    # Per-metric regressions append to fail_reasons via the rules in
+    # tests/metrics.METRIC_RULES.
+    from tests.metrics import compute_v18_report  # lazy import (avoids cost when this module is imported by ablation etc)
+    base_lines, _, _ = load_baseline(case)
+    v18 = compute_v18_report(lines, base_lines, bgr)
+    report["v18"] = v18
+    if v18["invariant_fails"]:
+        report["fail_reasons"].extend(
+            f"invariant: {msg}" for msg in v18["invariant_fails"])
+    if v18["metric_fails"]:
+        report["fail_reasons"].extend(
+            f"metric: {msg}" for msg in v18["metric_fails"])
+    if v18["invariants"]["goal_count"] > 0:
+        report["warn_reasons"].append(
+            f"v18 goal-invariants: {v18['invariants']['goal_count']} "
+            f"floating_opening(s) — gated once §2/§3 ship")
+    # Recompute final status after our additions.
+    if report["fail_reasons"]:
+        report["status"] = "FAIL"
+    elif report["warn_reasons"] and report["status"] == "PASS":
+        report["status"] = "WARNING"
+
     with open(cp["report"], "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
-    base_lines, _, _ = load_baseline(case)
     write_overlay(cp["overlay"], lines, base_lines, shape, stroke_width)
     return report, lines, shape, stroke_width
 
