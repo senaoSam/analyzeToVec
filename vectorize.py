@@ -2656,10 +2656,12 @@ def vectorize_bgr(bgr: np.ndarray, *,
     # mutation per endpoint (matches legacy's dominant single-truncate
     # behaviour). Case-specific NO-OP on source, load-bearing on sg2.
     s3 = _accept_truncate_overshoot_candidates(s3, tol=l_extend)
-    # Re-merge after snapping; some segments may now align colinearly.
-    # Step 8 phase 3: same candidate-based wrapper as phase 2 (above).
-    s3 = _accept_cluster_collinear_merge_candidates(
-        s3, perp_tol=merge_perp, gap_tol=merge_gap)
+    # Step 16: second collinear-merge call removed (case-specific patch).
+    # Ablation: source NO-OP, sg2 IOU=0.97 dN=0, Gemini IOU=0.95 dN+1.
+    # The first merge_collin already collapses obvious chains; the final
+    # ``_accept_merge_candidates`` at end of pipeline catches any new
+    # post-bridge merges. This intermediate "re-merge after snap" is the
+    # classic "fix-A-breaks-B" patch the refactor is meant to eliminate.
 
     # Wall-priority NetworkX node merge.
     # Step 7 phase 5: candidate-based wrapper around the 2D circular-tol
