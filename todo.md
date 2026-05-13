@@ -70,55 +70,47 @@ Rasterization 用 `cv2.line` thickness=1(或對應 local_thickness),保證可重
 
 ---
 
-## §2 · Step 19 — 源頭修法:Skeletonize 前先填色塊洞
+## §2 · Step 19 — 源頭修法:Skeletonize 前先填色塊洞(✗ 試 + revert)
 
-**動機**:現況 wall mask 在門/窗位置被挖空([vectorize.py:323-324](vectorize.py#L323-L324)),骨架化後牆中線在門洞兩側各自停住、中間是空的。後續 17 道補洞器其實都在試圖把這條斷掉的牆重新接回去——換言之大部分 cascade 是為了補這個源頭問題。
+**結果**:試了單純的 `wall_for_skel = wall ∪ dilated(chromatic)` 路徑,**反向**。
 
-### 19.1 — 加 `wall_for_skeleton` 中間 mask
-在 `segment_colors` 之後,skeletonize 之前:
-```
-wall_for_skel = wall_mask ∪ dilated(window_mask ∪ door_mask)
-```
-門/窗視同牆進入骨架化;骨架自然穿過門洞,牆中線變連續一條。
+- 牆中線確實連續了,但 output 多出穿過門窗的牆段
+- source: `wall_iou_vs_source` 0.4569 → 0.3818;total_length +32.5%
+- sg2: 全部 IOU 下降(wall −0.025、door −0.015、window −0.014)
+- 渲染上門窗被牆覆蓋,**明顯變差**(triptych 確認)
+- 主因:現況 step 17 trunk_split 已經把 source/sg2 的 floating_openings 收到 0;§19 在解決一個已經沒了的問題,代價是污染牆 IOU
 
-門/窗自己的 mask 不變、自己的骨架照舊獨立做,但**它們的端點現在會落在一條真實存在的牆段身上**。
+**結論**:若要走這條路,必須配套「chromatic-subtract 後處理」(把牆段在 chromatic body 上的部分切掉),但那等於把牆又切回片段,§19 的「連續性」好處被吃掉。改走 §20 的針對性修法。
 
-### 19.2 — 驗證下游補洞器變 NO-OP
-重新跑 ablation;預期以下 pass 大幅縮水或變 NO-OP:
-- `insert_missing_connectors`
-- `proximal_bridge_candidates`(剩下處理真正的牆 endpoint 鬆端)
-- `t_snap_with_extension`
-- 部分 `t_project` / `fuse` 的工作量
-
-確認後可考慮刪除變 NO-OP 的補洞器(分到 §6)。
-
-### 19.3 — Trunk_split 自然 fire
-門/窗端點現在直接落在牆 body interior → [generators.py:1749](generators.py#L1749) `trunk_split_candidates` 自動把牆拆成兩段、產生真正的 T。沒有任何新邏輯,只是源頭修對了讓既有 generator 找得到工作。
-
-**Done when**:metric-based regression 全綠,`floating_openings` 在 source/sg2/Gemini 三張都 = 0,wall_iou 不降、opening_iou 不降。
+關鍵 learning:在動源頭之前,先看 metric baseline ——
+若 floating_openings 已經是 0,§19 沒空間;只剩 Gemini 還有 3 個 → 走 §20。
 
 ---
 
 ## §3 · Step 20 — End-of-pipeline invariant:「色塊端點必須錨在牆」
 
-**動機**:即使 §2 解決大部分情境,還是要有 **after-the-fact 保證**——pipeline 終結時,每個 door/window 端點都必須通過 invariant 檢查,否則嘗試修補或丟棄。這層讓需求 (b) 從 "best effort" 變成 **post-condition**。
+**動機**:§18 metric 層做完後,floating_openings 變數實際分佈:
+- source: 0(step 17 trunk_split 已解決)
+- sg2: 0(同上)
+- Gemini: 3(仍是 GOAL violation,需要這層補上)
+
+§20 把 GOAL invariant 升級為 STRICT,並提供一個 candidate generator 主動處理現有 GOAL violation。這層讓需求 (b) 從 "best effort" 變成 **post-condition**。
 
 ### 20.1 — 新 candidate generator `chromatic_anchor_candidates`
-插在 `trunk_split` 之後(現在是 pipeline 最後)。對每個 door/window 端點檢查:
-1. 與牆端點重合(≤ ε)→ 通過,無動作
-2. 落在牆身上(perp ≤ ε)→ 已經由 trunk_split 處理,通過
-3. 與牆 mask 沿一條 axis-aligned 路徑連續可達牆端點 within K px → emit 候選:插入連接牆段
-4. 都不滿足 → emit 候選:標記端點,等待 audit 或丟棄該 opening
+插在 `trunk_split` 之後(現在是 pipeline 最後)。對每個 door/window 端點檢查 — 若無法通過 invariant.check_openings_anchored 則嘗試修補:
+1. 找最近的牆端點(在 max_radius 內、與 chromatic 段共享一個 near-axis)
+2. 若兩者間 wall mask 有連續證據(support ≥ K%):emit 候選 — 插入新 wall segment 從 chromatic endpoint 通到該 wall endpoint
+3. 沒有 mask 支持:不 emit(可能該 opening 本身就是誤偵測,留給 audit log)
 
-選項 3 的候選跟 `proximal_bridge` 的差別:proximal_bridge 只看 wall endpoint pair,這個新 generator 是「chromatic endpoint → 最近 wall mask 連通分量上的 wall endpoint」的非對稱配對。
+跟 `proximal_bridge` 的差別:proximal_bridge 只配對 wall↔wall;這個新 generator 是 chromatic→wall 的非對稱配對,專門收 chromatic invariant violation。
 
-### 20.2 — 用 invariant 強制執行
-invariant 在 §1.1 已經要求「每個 door/window 端點滿足三條件之一」。chromatic_anchor 候選若都未被接受,invariant 會 FAIL。
+### 20.2 — 用 invariant 升級為 STRICT 強制執行
+[tests/invariants.py](tests/invariants.py) 的 `floating_opening` 目前在 GOAL 層,在 §20 完成後從 GOAL 移到 STRICT。任一 chromatic endpoint 仍 floating → regression FAIL。
 
 ### 20.3 — 處理「真的就是錯誤偵測」的情境
-如果某個 door 在原圖位置就詭異(色塊偵測誤報),選項 4 的「丟棄該 opening」要走 audit log,記下哪個 opening 被丟、原因是什麼。
+若 generator 跑完仍有 floating endpoint(沒任何 wall 在附近 anchorable),代表色塊偵測在白底中誤報。短期:留為 STRICT FAIL,使用者得手動處理。中期:在 step 1 color segmentation 加 chromatic isolation 過濾(沒被牆包圍的孤立色塊丟掉)。
 
-**Done when**:`floating_openings == 0` 是 invariant 而非統計;三張 reference image 都通過。
+**Done when**:`floating_openings == 0` 是 invariant 而非統計;三張 reference image 都通過(Gemini 重新解封)。
 
 ---
 
