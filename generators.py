@@ -1853,3 +1853,229 @@ def trunk_split_candidates(segments: List[Dict],
             ))
     return out
 
+
+# ---------------------------------------------------------------------------
+# chromatic_anchor_bridge_candidates  (step 20)
+# ---------------------------------------------------------------------------
+#
+# Symmetric counterpart to proximal_bridge_candidates: that one bridges two
+# wall endpoints; this one bridges a floating chromatic (door/window)
+# endpoint to a nearby wall endpoint. The proposed bridge segments are
+# always type=wall — never modifies the chromatic segment's own coords,
+# never proposes a chromatic-only bridge, never moves an already-anchored
+# endpoint. Single purpose: get door/window endpoints onto wall mask
+# evidence so the chromatic-anchor invariant (tests/invariants.py)
+# becomes satisfiable as a post-condition.
+#
+# Why not extend the chromatic in place / snap it to the wall? Snap-with-
+# significant-displacement violates the strict Manhattan invariant (the
+# chromatic segment becomes diagonal). Inserting wall stubs lets the
+# chromatic stay axis-aligned and the new walls handle the connectivity.
+# The wall stubs are then natural targets for downstream trunk_split /
+# junction-aware merge, so the topology cleans up.
+#
+# Gating cascade (the conservative net):
+#   1. Endpoint MUST be floating (not anchored on any wall body within tol).
+#      Anchored endpoints are skipped — they're correct already.
+#   2. Wall endpoint must be within max_radius of the chromatic endpoint.
+#   3. Wall mask support along every new segment ≥ min_support — same
+#      gate proximal_bridge uses. Prevents inventing wall over white space.
+#   4. Score gate (delta > 0) in the caller. The new wall stub MUST
+#      improve the pipeline score; if it doesn't, the bridge is wrong.
+
+def _endpoint_anchored_on_wall(ex: float, ey: float,
+                               walls: List[Dict],
+                               tol: float = 1.0) -> bool:
+    """True iff (ex, ey) lies on any wall segment body within ``tol``."""
+    for w in walls:
+        ax = _axis_of(w)
+        if ax == "h":
+            if abs(ey - float(w["y1"])) > tol:
+                continue
+            x_lo, x_hi = sorted((float(w["x1"]), float(w["x2"])))
+            if x_lo - tol <= ex <= x_hi + tol:
+                return True
+        elif ax == "v":
+            if abs(ex - float(w["x1"])) > tol:
+                continue
+            y_lo, y_hi = sorted((float(w["y1"]), float(w["y2"])))
+            if y_lo - tol <= ey <= y_hi + tol:
+                return True
+    return False
+
+
+def chromatic_anchor_bridge_candidates(
+        segments: List[Dict],
+        wall_mask: Optional[np.ndarray],
+        *,
+        max_radius: float,
+        min_support: float = BRIDGE_MIN_SUPPORT,
+        colinear_tol: float = BRIDGE_COLINEAR_TOL_PX,
+        anchor_tol: float = 1.0,
+        ) -> List[C.Candidate]:
+    """Propose wall-stub bridges that anchor floating door/window endpoints.
+
+    For every chromatic endpoint that is *not* already anchored on a wall
+    body within ``anchor_tol``, search wall endpoints within ``max_radius``
+    and propose one or both axis-aligned L-bridges connecting them. Each
+    proposal is gated on ``min_support`` mask coverage along every new
+    segment (so we never invent wall over white space). The caller runs
+    score-and-accept on the returned list.
+
+    Args:
+        segments: pipeline state.
+        wall_mask: binary wall mask. Required (no candidates emitted
+            without it — there's no way to evidence-gate the bridges).
+        max_radius: Euclidean search radius from each floating chromatic
+            endpoint to candidate wall endpoints.
+        min_support: minimum fraction of mask-on pixels under each new
+            segment. Matches BRIDGE_MIN_SUPPORT default.
+        colinear_tol: |dx| or |dy| below this routes the proposal to a
+            1-seg axis-bridge instead of a 2-seg L-bridge.
+        anchor_tol: 1 px slack when checking whether a chromatic
+            endpoint is already on a wall body. Matches
+            invariants.BODY_PROXIMITY_PX.
+    """
+    if wall_mask is None or not segments:
+        return []
+
+    walls = [s for s in segments if s.get("type") == "wall"]
+    openings = [(i, s) for i, s in enumerate(segments)
+                if s.get("type") in ("door", "window")]
+    if not walls or not openings:
+        return []
+
+    # Per-wall axis + endpoint inventory.
+    wall_endpoints: List[Dict] = []
+    for i, s in enumerate(segments):
+        if s.get("type") != "wall":
+            continue
+        ax = _axis_of(s)
+        for end in ("1", "2"):
+            wall_endpoints.append({
+                "seg": i,
+                "end": end,
+                "x": float(s[f"x{end}"]),
+                "y": float(s[f"y{end}"]),
+                "seg_axis": ax,
+            })
+    if not wall_endpoints:
+        return []
+
+    r2 = max_radius * max_radius
+    cands: List[C.Candidate] = []
+    h, w = wall_mask.shape[:2]
+
+    for ci, chrom_seg in openings:
+        chrom_axis = _axis_of(chrom_seg)
+        for end in ("1", "2"):
+            ex = float(chrom_seg[f"x{end}"])
+            ey = float(chrom_seg[f"y{end}"])
+            # Gate 1: skip already-anchored endpoints.
+            if _endpoint_anchored_on_wall(ex, ey, walls, tol=anchor_tol):
+                continue
+
+            for wep in wall_endpoints:
+                wx, wy = wep["x"], wep["y"]
+                dxs = wx - ex
+                dys = wy - ey
+                d2 = dxs * dxs + dys * dys
+                if d2 > r2:
+                    continue
+                if d2 < 1.0:
+                    # Already at the wall endpoint — fuse would have
+                    # caught this; skip.
+                    continue
+                dx, dy = abs(dxs), abs(dys)
+
+                # Enumerate bridge proposals: (new_segs, kind, prefer)
+                bridges: List[Tuple[List[Dict], str, int]] = []
+
+                if dy <= colinear_tol and dx > colinear_tol:
+                    # Chromatic and wall share a horizontal line (~same y).
+                    # 1-seg horizontal bridge along y=ey.
+                    bridges.append((
+                        [{"type": "wall",
+                          "x1": min(ex, wx), "y1": ey,
+                          "x2": max(ex, wx), "y2": ey}],
+                        "axis_h",
+                        0,
+                    ))
+                elif dx <= colinear_tol and dy > colinear_tol:
+                    # Shared vertical line.
+                    bridges.append((
+                        [{"type": "wall",
+                          "x1": ex, "y1": min(ey, wy),
+                          "x2": ex, "y2": max(ey, wy)}],
+                        "axis_v",
+                        0,
+                    ))
+                elif dx > colinear_tol and dy > colinear_tol:
+                    # L-bridge: two orientations.
+                    #
+                    # If the chromatic is horizontal, we *strongly* prefer
+                    # the orientation that exits the chromatic endpoint
+                    # vertically first (perpendicular to its body) so the
+                    # new wall doesn't overlap the chromatic body — that
+                    # overlap would A) double-cover door pixels and B)
+                    # almost certainly fail wall_mask support (door pixels
+                    # were subtracted from wall mask). Encode the
+                    # preference via a sort-key field.
+                    prefer_v_first = (chrom_axis == "h")
+                    prefer_h_first = (chrom_axis == "v")
+                    # Orientation 1: horizontal leg from (ex, ey) to (wx, ey),
+                    # then vertical leg from (wx, ey) to (wx, wy).
+                    bridges.append((
+                        [{"type": "wall",
+                          "x1": ex, "y1": ey, "x2": wx, "y2": ey},
+                         {"type": "wall",
+                          "x1": wx, "y1": ey, "x2": wx, "y2": wy}],
+                        "l_h_first",
+                        0 if prefer_h_first else 1,
+                    ))
+                    # Orientation 2: vertical leg from (ex, ey) to (ex, wy),
+                    # then horizontal leg from (ex, wy) to (wx, wy).
+                    bridges.append((
+                        [{"type": "wall",
+                          "x1": ex, "y1": ey, "x2": ex, "y2": wy},
+                         {"type": "wall",
+                          "x1": ex, "y1": wy, "x2": wx, "y2": wy}],
+                        "l_v_first",
+                        0 if prefer_v_first else 1,
+                    ))
+
+                for new_segs, kind, prefer in bridges:
+                    supports: List[float] = []
+                    ok = True
+                    for ns in new_segs:
+                        sup = C.mask_support_along(
+                            wall_mask, ns["x1"], ns["y1"], ns["x2"], ns["y2"])
+                        supports.append(sup)
+                        if sup < min_support:
+                            ok = False
+                            break
+                    if not ok:
+                        continue
+
+                    total_len = sum(
+                        float(np.hypot(ns["x2"] - ns["x1"], ns["y2"] - ns["y1"]))
+                        for ns in new_segs)
+                    cands.append(C.Candidate(
+                        op="chromatic_anchor",
+                        add=new_segs,
+                        mutate=[],
+                        meta={
+                            "kind": kind,
+                            "prefer": prefer,
+                            "supports": supports,
+                            "min_support_observed": min(supports),
+                            "total_len": total_len,
+                            "chrom_endpoint": (ex, ey),
+                            "wall_endpoint": (wx, wy),
+                            "chrom_seg_idx": ci,
+                            "chrom_end": end,
+                            "chrom_type": chrom_seg.get("type"),
+                        },
+                    ))
+    return cands
+

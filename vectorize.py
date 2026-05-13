@@ -1474,6 +1474,100 @@ def _accept_canonicalize_offset_candidates(
     return out
 
 
+def _accept_chromatic_anchor_candidates(lines: List[Dict],
+                                          *,
+                                          wall_mask: np.ndarray = None,
+                                          max_radius: float,
+                                          min_support: float = 0.85,
+                                          wall_evidence: np.ndarray = None,
+                                          door_mask: np.ndarray = None,
+                                          window_mask: np.ndarray = None,
+                                          audit_recorder=None,
+                                          ) -> List[Dict]:
+    """Step 20: anchor floating chromatic (door/window) endpoints onto walls.
+
+    Runs ``generators.chromatic_anchor_bridge_candidates`` and accepts
+    each whose pipeline-score delta is strictly positive. The geometric
+    gate (floating endpoint + wall_mask support along every new segment)
+    is the first line of defence; the score gate is the second. Together
+    they prevent the generator from inventing wall where the source
+    image doesn't support one.
+
+    Greedy accept order: shorter bridges first, then higher mask
+    support, then the orientation preferred by the chromatic axis
+    (vertical-first stub for an H chromatic, etc.). Once an endpoint
+    has been anchored by one bridge, further candidates targeting the
+    same endpoint are dropped — the endpoint is no longer floating.
+    """
+    import candidates as C
+    import generators as G
+    import scoring as S
+
+    if not lines:
+        return list(lines)
+    if wall_mask is None:
+        return list(lines)
+
+    cands = G.chromatic_anchor_bridge_candidates(
+        lines, wall_mask=wall_mask,
+        max_radius=max_radius, min_support=min_support)
+    if not cands:
+        return list(lines)
+
+    # Sort: shorter bridge first (less invented wall), then higher
+    # support, then orientation preference (lower "prefer" wins; ties
+    # broken by total_len).
+    cands.sort(key=lambda c: (
+        c.meta["prefer"],
+        c.meta["total_len"],
+        -c.meta["min_support_observed"],
+    ))
+
+    if wall_evidence is None:
+        wall_evidence = (wall_mask > 0).astype(np.float32)
+
+    current = list(lines)
+    base_score = S.compute_score(current,
+                                 wall_evidence=wall_evidence,
+                                 door_mask=door_mask,
+                                 window_mask=window_mask,
+                                 wall_mask=wall_mask)
+    consumed_chromatic_endpoints: Set[Tuple[int, str]] = set()
+
+    for cand in cands:
+        key = (cand.meta["chrom_seg_idx"], cand.meta["chrom_end"])
+        if key in consumed_chromatic_endpoints:
+            if audit_recorder is not None:
+                audit_recorder.record(
+                    op=cand.op, accepted=False, delta=0.0,
+                    meta=cand.meta, reason="consumed_endpoint",
+                    position=_audit_position(cand),
+                )
+            continue
+        trial = C.apply_candidate(current, cand)
+        trial_score = S.compute_score(trial,
+                                      wall_evidence=wall_evidence,
+                                      door_mask=door_mask,
+                                      window_mask=window_mask,
+                                      wall_mask=wall_mask)
+        delta = trial_score.total - base_score.total
+        accept = delta > CANDIDATE_MIN_ACCEPT_DELTA
+        if audit_recorder is not None:
+            delta_terms = {k: trial_score.terms.get(k, 0.0) - base_score.terms.get(k, 0.0)
+                           for k in set(trial_score.terms) | set(base_score.terms)}
+            audit_recorder.record(
+                op=cand.op, accepted=accept, delta=delta,
+                delta_terms=delta_terms, meta=cand.meta,
+                reason="score_gate",
+                position=_audit_position(cand),
+            )
+        if accept:
+            current = trial
+            base_score = trial_score
+            consumed_chromatic_endpoints.add(key)
+    return current
+
+
 def _accept_trunk_split_candidates(lines: List[Dict]) -> List[Dict]:
     """Topology completion pass: split a host trunk at every interior
     point where a free endpoint sits exactly on its body.
@@ -2682,6 +2776,25 @@ def vectorize_bgr(bgr: np.ndarray, *,
     # (sub-trunks render identically to the original) but completes the
     # graph topology so node degree counts reflect reality.
     snapped = _accept_trunk_split_candidates(snapped)
+
+    # Step 20: anchor any floating chromatic endpoints. Most images
+    # finish with floating_openings == 0 because step 17 trunk_split
+    # already handled the "endpoint sits on wall body interior" case.
+    # This pass picks up the remainder: a door/window endpoint near
+    # but not on a wall corner (Gemini #2, #3) gets an L-shaped wall
+    # stub inserted that runs from the chromatic endpoint to the wall
+    # corner. Both wall_mask support and score-gate must accept; if
+    # neither does, the floating endpoint stays floating (the
+    # invariant layer will report it).
+    snapped = _accept_chromatic_anchor_candidates(
+        snapped,
+        wall_mask=masks.get("wall"),
+        max_radius=ray_ext,          # ~40 px at REFERENCE_DIM
+        wall_evidence=wall_evidence_map,
+        door_mask=masks.get("door"),
+        window_mask=masks.get("window"),
+        audit_recorder=audit_recorder,
+    )
 
     # Strip pipeline-internal fields (e.g. ``local_thickness`` from
     # canonical_line) so the public JSON payload stays canonical
