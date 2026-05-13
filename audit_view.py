@@ -11,9 +11,16 @@ Reads an audit JSON dumped by ``vectorize_bgr(audit_path=...)`` and:
      to decide whether a term needs fixing (whole-population bias) or
      individual decisions are just edge cases.
 
+  3. ``chain`` — for each remaining free endpoint (degree=1 node in
+     the final segments), report the rejected candidates that were
+     spatially near it and which score term killed them. Connects
+     "what's still broken" to "what got rejected nearby", surfacing
+     bundle-acceptance candidates for future work.
+
 CLI:
     py -3 audit_view.py overlay AUDIT_JSON IMAGE_PATH OUTPUT_PNG
     py -3 audit_view.py stats   AUDIT_JSON
+    py -3 audit_view.py chain   AUDIT_JSON LINES_JSON [--radius PIX]
 
 The overlay format intentionally stays sparse so spatial structure is
 visible: small filled circle per event, color by accepted state, size
@@ -202,6 +209,198 @@ def print_stats(events: List[Dict[str, Any]]) -> None:
         print()
 
 
+def _free_endpoints(segments: List[Dict[str, Any]]
+                    ) -> List[Dict[str, Any]]:
+    """Return degree-1 endpoints from a segments list.
+
+    Each entry: ``{"x": x, "y": y, "type": seg_type, "seg_idx": i,
+    "end": "1"|"2"}``. Degree is computed on integer-pixel-rounded
+    coords (``int(round(x))``) to match ``regression.py``'s
+    ``compute_graph_metrics`` — so the chain tool's endpoint count
+    aligns with the number the user sees from regression / vectorize
+    stats output.
+    """
+    deg: Dict[Any, int] = defaultdict(int)
+
+    def _qk(x: float, y: float) -> Any:
+        return (int(round(float(x))), int(round(float(y))))
+
+    for s in segments:
+        deg[_qk(s["x1"], s["y1"])] += 1
+        deg[_qk(s["x2"], s["y2"])] += 1
+
+    out: List[Dict[str, Any]] = []
+    for i, s in enumerate(segments):
+        for end in ("1", "2"):
+            x = float(s[f"x{end}"])
+            y = float(s[f"y{end}"])
+            if deg[_qk(x, y)] == 1:
+                out.append({"x": x, "y": y, "type": s.get("type", "?"),
+                            "seg_idx": i, "end": end})
+    return out
+
+
+def chain_analysis(events: List[Dict[str, Any]],
+                   segments: List[Dict[str, Any]],
+                   *,
+                   radius: float = 20.0,
+                   top_k_per_endpoint: int = 3,
+                   min_abs_delta: float = 1e-4
+                   ) -> Dict[str, Any]:
+    """For each free endpoint in ``segments``, find rejected candidates
+    within ``radius`` of it; for each rejected candidate, identify the
+    most-negative ``delta_term`` (the "blocker").
+
+    Returns ``{"endpoints": [...], "summary": {...}}`` where each
+    endpoint entry lists the top-K nearest rejected candidates ranked
+    by distance and a per-blocker count is rolled up in summary.
+
+    Filters:
+      * ``accepted == False`` AND ``reason == "score_gate"`` —
+        ``used_endpoint`` / ``used_mutation`` are administrative
+        skips, not score-blocked.
+      * ``abs(delta) >= min_abs_delta`` — rejections with
+        delta ≈ 0 are the strict ``>`` policy rejecting score-neutral
+        candidates; they couldn't have helped close the endpoint
+        regardless, so they're filtered out as noise. Lower
+        ``min_abs_delta`` to 0 to see them.
+      * Dedup near-duplicate events at the same position: passes that
+        repeatedly emit the same rejected candidate (e.g.
+        ``t_snap_with_extension`` 6-pass inner loop) are collapsed
+        to one entry per (op, blocker, ~1px position) bucket.
+    """
+    free = _free_endpoints(segments)
+
+    # Pre-filter score-blocked events with a usable position.
+    rej: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+    for e in events:
+        if e.get("accepted"):
+            continue
+        if e.get("reason") != "score_gate":
+            continue
+        pos = e.get("position")
+        if pos is None or not isinstance(pos, (list, tuple)) or len(pos) != 2:
+            continue
+        if abs(float(e.get("delta", 0.0))) < min_abs_delta:
+            continue
+        # Dedup: same op, same blocker term, same ~1-px position.
+        dt = e.get("delta_terms") or {}
+        blocker = None
+        worst = 0.0
+        for term, val in dt.items():
+            try:
+                fv = float(val)
+            except (TypeError, ValueError):
+                continue
+            if fv < worst:
+                worst = fv
+                blocker = term
+        key = (e.get("op"), blocker,
+               int(round(float(pos[0]))), int(round(float(pos[1]))))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        rej.append(e)
+
+    radius2 = radius * radius
+    endpoint_reports: List[Dict[str, Any]] = []
+    blocker_counter: Counter = Counter()
+    n_isolated = 0
+    n_with_match = 0
+
+    for fe in free:
+        fx, fy = fe["x"], fe["y"]
+        nearby: List[Dict[str, Any]] = []
+        for e in rej:
+            ex, ey = float(e["position"][0]), float(e["position"][1])
+            dx = ex - fx
+            dy = ey - fy
+            d2 = dx * dx + dy * dy
+            if d2 > radius2:
+                continue
+            # Dominant blocker = most-negative delta_term for this event.
+            dt = e.get("delta_terms") or {}
+            blocker = None
+            blocker_val = 0.0
+            for term, val in dt.items():
+                try:
+                    fv = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if fv < blocker_val:
+                    blocker_val = fv
+                    blocker = term
+            nearby.append({
+                "op": e.get("op", "?"),
+                "delta": float(e.get("delta", 0.0)),
+                "distance": (d2 ** 0.5),
+                "position": [ex, ey],
+                "blocker_term": blocker,
+                "blocker_value": blocker_val,
+                "meta": e.get("meta") or {},
+            })
+        nearby.sort(key=lambda r: r["distance"])
+        nearby = nearby[:top_k_per_endpoint]
+        if nearby:
+            n_with_match += 1
+            # Count nearest-only blocker for summary so each endpoint
+            # contributes one vote (avoid double-counting bundles).
+            top_blocker = nearby[0].get("blocker_term")
+            if top_blocker is not None:
+                blocker_counter[top_blocker] += 1
+        else:
+            n_isolated += 1
+        endpoint_reports.append({
+            "x": fx,
+            "y": fy,
+            "type": fe["type"],
+            "seg_idx": fe["seg_idx"],
+            "end": fe["end"],
+            "nearby_rejects": nearby,
+        })
+
+    return {
+        "endpoints": endpoint_reports,
+        "summary": {
+            "free_endpoint_count": len(free),
+            "with_nearby_reject": n_with_match,
+            "isolated": n_isolated,
+            "radius": radius,
+            "top_blockers": blocker_counter.most_common(10),
+        },
+    }
+
+
+def print_chain(report: Dict[str, Any]) -> None:
+    """Human-readable chain report. JSON dump available via --json."""
+    s = report["summary"]
+    print(f"=== Free endpoint -> nearby rejects (radius={s['radius']:.1f} px) ===\n")
+    print(f"  free endpoints      : {s['free_endpoint_count']}")
+    print(f"  with nearby reject  : {s['with_nearby_reject']}")
+    print(f"  isolated (no match) : {s['isolated']}\n")
+
+    if s["top_blockers"]:
+        print("Top blocker terms (one vote per endpoint, its nearest reject):")
+        for term, n in s["top_blockers"]:
+            print(f"  {term:<28} {n:>4d}")
+        print()
+
+    for i, ep in enumerate(report["endpoints"], start=1):
+        prefix = f"#{i:>3d}"
+        loc = f"({ep['x']:.1f}, {ep['y']:.1f})"
+        print(f"{prefix} {ep['type']:<6} at {loc}  seg={ep['seg_idx']} end={ep['end']}")
+        if not ep["nearby_rejects"]:
+            print("     (no rejected candidate within radius)\n")
+            continue
+        for r in ep["nearby_rejects"]:
+            bl = r["blocker_term"] or "?"
+            bv = r["blocker_value"]
+            print(f"     - op={r['op']:<16} d={r['distance']:>5.1f}  "
+                  f"delta={r['delta']:>+7.3f}  blocker={bl} ({bv:+.3f})")
+        print()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -217,6 +416,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                               help="print accept/reject + term-driver summary")
     p_stats.add_argument("audit_json")
 
+    p_chain = sub.add_parser("chain",
+                              help="free endpoint -> nearby rejected candidates")
+    p_chain.add_argument("audit_json")
+    p_chain.add_argument("lines_json",
+                          help="JSON with {\"lines\": [...]} (output/<stem>.json)")
+    p_chain.add_argument("--radius", type=float, default=20.0,
+                          help="search radius around each free endpoint, px")
+    p_chain.add_argument("--top-k", type=int, default=3,
+                          help="how many nearest rejects to list per endpoint")
+    p_chain.add_argument("--json", dest="json_out",
+                          help="dump full report as JSON to this path")
+
     args = p.parse_args(argv)
 
     events = _load_audit(args.audit_json)
@@ -225,6 +436,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         render_overlay(events, args.image_path, args.output_png)
     elif args.cmd == "stats":
         print_stats(events)
+    elif args.cmd == "chain":
+        with open(args.lines_json, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        segments = payload.get("lines", payload)
+        report = chain_analysis(events, segments,
+                                radius=args.radius,
+                                top_k_per_endpoint=args.top_k)
+        print_chain(report)
+        if args.json_out:
+            with open(args.json_out, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(f"  full report: {args.json_out}")
     else:
         p.print_help()
         return 1
