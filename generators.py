@@ -1714,3 +1714,142 @@ def t_junction_snap_candidates(segments: List[Dict],
         ))
     return cands
 
+
+# ---------------------------------------------------------------------------
+# trunk_split: topological T-junction completion (graph-only, no geometry).
+# ---------------------------------------------------------------------------
+#
+# After all snap / project / canonical passes have run, the pipeline can
+# end up in this state: a free endpoint at (ex, ey) sits exactly on
+# another segment's body interior, but the segment is one continuous span
+# whose own endpoints lie elsewhere -- so degree(ep) is 1 even though
+# geometrically there's a T-junction there.
+#
+# Audit chain analysis (see ``audit_view.py chain``) reports source 8/12,
+# sg2 22/24 of free endpoints in this exact state: ``d=0.00`` to a
+# perpendicular trunk's body. The candidates the t_project / t_snap
+# generators emit are "snap endpoint onto the line", which is a no-op
+# when the endpoint is already on the line -- they never fire and the
+# T-junction stays topologically broken.
+#
+# This generator emits ONE candidate per (free_endpoint, host_trunk)
+# pair: remove the host trunk, add two collinear sub-trunks that share
+# the free endpoint's coordinate. The rendered pixels are bit-identical
+# (two collinear touching segments draw exactly like the original). The
+# graph topology changes: the host trunk's interior point becomes a real
+# node, free_endpoint count drops, junction count rises.
+#
+# Gate: strict geometric. The endpoint's perpendicular distance to the
+# trunk line must be 0 (within float epsilon), and the endpoint must be
+# *strictly* interior to the trunk body (not at either of its endpoints,
+# which is already a topological joint). Cross-type allowed -- door /
+# window jambs landing on wall bodies are valid splits.
+
+
+def trunk_split_candidates(segments: List[Dict],
+                           *,
+                           pos_eps: float = 1e-3,
+                           interior_margin: float = 1.0,
+                           ) -> List[C.Candidate]:
+    """Emit a Candidate per (free endpoint, host trunk interior) pair.
+
+    ``pos_eps`` — perpendicular-distance tolerance for "on the line".
+    With strict Manhattan + canonical_line upstream, exact equality is
+    typical; the epsilon catches sub-pixel float drift only.
+
+    ``interior_margin`` — minimum distance from either trunk endpoint to
+    the split point. Below this, the geometry is "endpoint near endpoint"
+    territory, which fuse / snap_endpoints handle; splitting that close
+    would create a near-zero-length sub-segment.
+
+    Returns at most one candidate per free endpoint (closest valid
+    trunk wins on ties; first-match in segment order on equal closeness).
+    The caller is expected to run this as a fixed-point loop because
+    multiple endpoints may want to split the same trunk -- after the
+    first split the trunk is gone and the second split applies to one
+    of the new sub-trunks.
+    """
+    from collections import defaultdict
+
+    if not segments:
+        return []
+
+    # Integer-pixel-rounded degree map (matches regression.py and
+    # ``audit_view._free_endpoints``). Sub-pixel coords that round to
+    # the same int pixel count as one joint.
+    deg: Dict[Tuple[int, int], int] = defaultdict(int)
+    for s in segments:
+        deg[(int(round(float(s["x1"]))), int(round(float(s["y1"]))))] += 1
+        deg[(int(round(float(s["x2"]))), int(round(float(s["y2"]))))] += 1
+
+    out: List[C.Candidate] = []
+    for i, ep_seg in enumerate(segments):
+        for end in ("1", "2"):
+            ex = float(ep_seg[f"x{end}"])
+            ey = float(ep_seg[f"y{end}"])
+            if deg[(int(round(ex)), int(round(ey)))] != 1:
+                continue
+
+            best_j = -1
+            best_score = None  # smaller = better: (perp_dist, distance_to_nearest_trunk_end)
+            for j, trunk in enumerate(segments):
+                if i == j:
+                    continue
+                tx1, ty1 = float(trunk["x1"]), float(trunk["y1"])
+                tx2, ty2 = float(trunk["x2"]), float(trunk["y2"])
+                trunk_ax = _axis_of(trunk)
+                if trunk_ax == "v":
+                    line_x = tx1
+                    perp = abs(ex - line_x)
+                    if perp > pos_eps:
+                        continue
+                    lo, hi = sorted((ty1, ty2))
+                    if not (lo + interior_margin <= ey <= hi - interior_margin):
+                        continue
+                    margin_to_end = min(ey - lo, hi - ey)
+                elif trunk_ax == "h":
+                    line_y = ty1
+                    perp = abs(ey - line_y)
+                    if perp > pos_eps:
+                        continue
+                    lo, hi = sorted((tx1, tx2))
+                    if not (lo + interior_margin <= ex <= hi - interior_margin):
+                        continue
+                    margin_to_end = min(ex - lo, hi - ex)
+                else:
+                    continue
+                # Prefer the trunk whose interior margin is largest (least
+                # likely to land near an existing endpoint). Tie-break on
+                # smallest perp distance.
+                score = (perp, -margin_to_end)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_j = j
+
+            if best_j < 0:
+                continue
+
+            trunk = segments[best_j]
+            sub_a = dict(trunk)
+            sub_a["x2"] = ex
+            sub_a["y2"] = ey
+            sub_b = dict(trunk)
+            sub_b["x1"] = ex
+            sub_b["y1"] = ey
+            out.append(C.Candidate(
+                op="trunk_split",
+                add=[sub_a, sub_b],
+                remove=[best_j],
+                mutate=[],
+                meta={
+                    "trunk_idx": best_j,
+                    "trunk_type": trunk.get("type"),
+                    "split_at": (ex, ey),
+                    "free_endpoint_idx": i,
+                    "free_endpoint_end": end,
+                    "free_endpoint_type": ep_seg.get("type"),
+                    "perp_dist": float(best_score[0]),
+                },
+            ))
+    return out
+

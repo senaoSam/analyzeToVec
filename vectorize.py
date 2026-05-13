@@ -1408,6 +1408,34 @@ def _accept_canonicalize_offset_candidates(
     return out
 
 
+def _accept_trunk_split_candidates(lines: List[Dict]) -> List[Dict]:
+    """Topology completion pass: split a host trunk at every interior
+    point where a free endpoint sits exactly on its body.
+
+    Fixed-point loop because multiple endpoints can target the same
+    trunk -- after the first split the trunk's index changes, and any
+    other endpoint still on the new sub-trunk's body will be picked up
+    in the next regeneration. No score gate: the operation is pure
+    topology (sub-trunks render identically to the original) and the
+    geometric gate (degree=1 endpoint + perp_dist=0 + strictly interior)
+    is the entire safety net.
+    """
+    import candidates as C
+    import generators as G
+    if not lines:
+        return list(lines)
+    current = list(lines)
+    max_iter = 4 * len(current) + 8
+    for _ in range(max_iter):
+        cands = G.trunk_split_candidates(current)
+        if not cands:
+            break
+        # Greedy: apply the first candidate, regenerate. Different
+        # candidates can target the same trunk, so we cannot batch.
+        current = C.apply_candidate(current, cands[0])
+    return current
+
+
 def _accept_truncate_overshoot_candidates(lines: List[Dict],
                                             *,
                                             tol: float,
@@ -2575,6 +2603,17 @@ def vectorize_bgr(bgr: np.ndarray, *,
         wall_mask=masks.get("wall"),  # step 11: thick-wall-aware junction
         audit_recorder=audit_recorder,
     )
+
+    # Step 17: topology completion. After all geometric passes converge,
+    # a free endpoint can still sit *exactly* on another segment's body
+    # interior -- the geometry is a T-junction but the segment list
+    # doesn't represent it as one (host trunk is one continuous span).
+    # Chain analysis (audit_view.py chain) confirmed source 8/12 and sg2
+    # 22/24 free endpoints in this state, all at d=0.00. Splitting the
+    # host trunk at the free endpoint's coord introduces no new geometry
+    # (sub-trunks render identically to the original) but completes the
+    # graph topology so node degree counts reflect reality.
+    snapped = _accept_trunk_split_candidates(snapped)
 
     # Strip pipeline-internal fields (e.g. ``local_thickness`` from
     # canonical_line) so the public JSON payload stays canonical
