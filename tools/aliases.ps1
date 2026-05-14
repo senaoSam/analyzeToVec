@@ -11,11 +11,10 @@
 $_AV_ROOT = Split-Path -Parent $PSScriptRoot
 
 function vectorize    { py (Join-Path $_AV_ROOT 'vectorize.py')        @args }
-function preview      { py (Join-Path $_AV_ROOT 'preview.py')          @args }
 function regression   { py (Join-Path $_AV_ROOT 'tools\regression.py') @args }
 function ablation     { py (Join-Path $_AV_ROOT 'tools\ablation.py')   @args }
 function audit-view   { py (Join-Path $_AV_ROOT 'tools\audit_view.py') @args }
 
 Write-Host "analyzeToVec shortcuts registered:" -ForegroundColor Green
-Write-Host "  vectorize  preview  regression  ablation  audit-view"
+Write-Host "  vectorize  regression  ablation  audit-view"
 Write-Host "  (root: $_AV_ROOT)"

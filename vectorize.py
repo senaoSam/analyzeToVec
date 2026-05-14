@@ -861,6 +861,36 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                 trunk_idx, snap_x, snap_y, need_extend, trunk_axis = best
                 trunk = segs[trunk_idx]
 
+                # Zero-length collapse guard. If the proposed snap would
+                # shrink seg_i to (near) zero length, the snap is a T-stub
+                # being pulled onto the same trunk its far end is already
+                # joined to -- post-pass `(x1,y1)!=(x2,y2)` then deletes
+                # the stub. Two flavours need different treatment:
+                #
+                #   real thin-wall feature (door jamb, T-protrusion): seg
+                #     is the centerline of its own narrow wall body.
+                #     local_thickness ~= 2-4 px. Collapse would delete a
+                #     real wall -- skip the candidate.
+                #   skeletonization artefact (manhattan_force_axis snap of
+                #     a diagonal medial axis through a thick corner block /
+                #     pillar): seg lives inside a much wider wall mass.
+                #     local_thickness >> typical wall. Collapse only
+                #     removes the snap artefact -- let it through.
+                #
+                # local_thickness was attached by canonicalize_offset_
+                # candidates upstream, in raw pixels at the seg's body.
+                # Threshold scales with tol so it auto-adapts to image
+                # size (tol = GAP_CLOSE_TOL_PX * scale).
+                _other = "2" if end == "1" else "1"
+                if my_axis == "h":
+                    _new_len = abs(snap_x - float(seg[f"x{_other}"]))
+                else:
+                    _new_len = abs(snap_y - float(seg[f"y{_other}"]))
+                if _new_len < 1.0:
+                    _thick = float(seg.get("local_thickness", 0.0))
+                    if _thick < tol / 4.0:
+                        continue
+
                 # Evidence gate on trunk-extension stretch.
                 if need_extend is not None and masks is not None:
                     trunk_mask = masks.get(trunk["type"])
@@ -2135,6 +2165,42 @@ def _path_mask_support(mask: np.ndarray, x1: float, y1: float,
     return hit / n
 
 
+def _path_max_gap_frac(mask: np.ndarray, x1: float, y1: float,
+                       x2: float, y2: float) -> float:
+    """Return the longest consecutive off-mask run along the path as a
+    fraction of total path length.
+
+    Average ``mask_support_along`` cannot tell a uniformly-noisy path
+    (skeletonization jitter, every other pixel off-mask: support ~0.5)
+    apart from a path that is on-mask at both ends but crosses a large
+    contiguous white gap in the middle (also support ~0.5). The first
+    is a real wall; the second isn't. This helper measures the worst
+    contiguous gap so callers can reject the second case.
+
+    Returns 0.0 when mask is None, when the path is shorter than 1 px,
+    or when every sample is on-mask.
+    """
+    if mask is None:
+        return 0.0
+    h, w = mask.shape[:2]
+    length = float(np.hypot(x2 - x1, y2 - y1))
+    if length < 1.0:
+        return 0.0
+    n = max(8, int(round(length)))
+    xs = np.linspace(x1, x2, n).round().astype(int).clip(0, w - 1)
+    ys = np.linspace(y1, y2, n).round().astype(int).clip(0, h - 1)
+    on = mask[ys, xs] > 0
+    max_run = cur = 0
+    for v in on:
+        if not v:
+            cur += 1
+            if cur > max_run:
+                max_run = cur
+        else:
+            cur = 0
+    return max_run / n
+
+
 
 
 def insert_missing_connectors(lines: List[Dict],
@@ -2219,9 +2285,11 @@ def insert_missing_connectors(lines: List[Dict],
                     ylo, yhi = sorted((yi, yj))
                     if wall_mask is not None:
                         support = C.mask_support_along(wall_mask, cx, ylo, cx, yhi)
+                        max_gap = _path_max_gap_frac(wall_mask, cx, ylo, cx, yhi)
                     else:
                         support = 1.0
-                    if support < gate_min:
+                        max_gap = 0.0
+                    if support < gate_min or max_gap > 0.5:
                         continue
                     new_seg = {"type": "wall", "x1": cx, "y1": ylo,
                                "x2": cx, "y2": yhi}
@@ -2240,9 +2308,11 @@ def insert_missing_connectors(lines: List[Dict],
                     xlo, xhi = sorted((xi, xj))
                     if wall_mask is not None:
                         support = C.mask_support_along(wall_mask, xlo, cy, xhi, cy)
+                        max_gap = _path_max_gap_frac(wall_mask, xlo, cy, xhi, cy)
                     else:
                         support = 1.0
-                    if support < gate_min:
+                        max_gap = 0.0
+                    if support < gate_min or max_gap > 0.5:
                         continue
                     new_seg = {"type": "wall", "x1": xlo, "y1": cy,
                                "x2": xhi, "y2": cy}
