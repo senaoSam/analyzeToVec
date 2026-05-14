@@ -72,15 +72,12 @@ def normalize_lines(lines: List[Dict]) -> List[Tuple]:
     """Round coords to 1 px, put endpoints in canonical (min,max) order,
     sort by (type, x1, y1, x2, y2). Ignore non-geometric fields.
     """
+    from geom_utils import endpoint_keys_for_segment
     norm: List[Tuple] = []
     for s in lines:
         t = s.get("type", "")
-        x1 = int(round(float(s["x1"])))
-        y1 = int(round(float(s["y1"])))
-        x2 = int(round(float(s["x2"])))
-        y2 = int(round(float(s["y2"])))
+        a, b = endpoint_keys_for_segment(s)
         # canonical endpoint order: smaller (x, y) first
-        a, b = (x1, y1), (x2, y2)
         if b < a:
             a, b = b, a
         norm.append((t, a[0], a[1], b[0], b[1]))
@@ -176,6 +173,7 @@ def compute_distance_metrics(mask_a: np.ndarray, mask_b: np.ndarray) -> Dict[str
 def compute_graph_metrics(lines: List[Dict]) -> Dict:
     """num_segments / count_by_type / free_endpoints / num_short_segments / total_length_by_type."""
     from collections import Counter
+    from geom_utils import endpoint_keys_for_segment
     count_by_type: Counter = Counter()
     total_length_by_type: Dict[str, float] = {}
     nodes: Counter = Counter()
@@ -183,11 +181,10 @@ def compute_graph_metrics(lines: List[Dict]) -> Dict:
     for s in lines:
         t = s.get("type", "")
         count_by_type[t] += 1
-        x1, y1 = int(round(float(s["x1"]))), int(round(float(s["y1"])))
-        x2, y2 = int(round(float(s["x2"]))), int(round(float(s["y2"])))
-        nodes[(x1, y1)] += 1
-        nodes[(x2, y2)] += 1
-        length = float(np.hypot(x2 - x1, y2 - y1))
+        k1, k2 = endpoint_keys_for_segment(s)
+        nodes[k1] += 1
+        nodes[k2] += 1
+        length = float(np.hypot(k2[0] - k1[0], k2[1] - k1[1]))
         total_length_by_type[t] = total_length_by_type.get(t, 0.0) + length
         if length < 10.0:
             n_short += 1

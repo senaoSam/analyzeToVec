@@ -176,11 +176,8 @@ class SpatialGate:
         across the full segment list. Convenience for passes that operate
         on free endpoints.
         """
-        from collections import Counter
-        cnt: Counter = Counter()
-        for s in self._segments:
-            cnt[(int(round(s["x1"])), int(round(s["y1"])))] += 1
-            cnt[(int(round(s["x2"])), int(round(s["y2"])))] += 1
+        from geom_utils import node_degree
+        cnt = node_degree(self._segments)
         return [pt for pt, c in cnt.items() if c == 1]
 
 

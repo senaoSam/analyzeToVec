@@ -39,6 +39,7 @@ import numpy as np
 
 import candidates as C
 from canonical_line import compute_local_thickness
+from geom_utils import endpoint_key as _endpoint_key, node_degree as _node_degree_shared
 
 
 # Wall-priority table — keep in sync with vectorize.TYPE_PRIORITY. Walls
@@ -83,16 +84,17 @@ BRIDGE_MAX_THICKNESS_RATIO = 3.0
 # ---------------------------------------------------------------------------
 
 def _round_key(x: float, y: float, quantize: int = 1) -> tuple:
+    # Preserved as a thin wrapper for the legacy ``quantize`` parameter
+    # (only ``quantize=1`` is used in practice). For ``quantize=1`` this is
+    # equivalent to ``endpoint_key(x, y, precision=0)`` from geom_utils.
+    if quantize == 1:
+        return _endpoint_key(x, y)
     return (int(round(x / quantize)) * quantize,
             int(round(y / quantize)) * quantize)
 
 
 def _node_degree(segments: Sequence[Dict]) -> Counter:
-    cnt: Counter = Counter()
-    for s in segments:
-        cnt[_round_key(s["x1"], s["y1"])] += 1
-        cnt[_round_key(s["x2"], s["y2"])] += 1
-    return cnt
+    return _node_degree_shared(segments)
 
 
 # ---------------------------------------------------------------------------
@@ -344,11 +346,14 @@ def proximal_bridge_candidates(segments: List[Dict],
 # a candidate is *not* generated when the would-be interior point of the
 # merged span coincides with an endpoint of any segment outside the pair.
 
-_MERGE_QUANTIZE = 100  # 0.01-px grid for robust endpoint equality
+_MERGE_QUANTIZE = 100  # 0.01-px grid for robust endpoint equality.
+# Note: still used by _line_keys below for single-coord bucketing (not an
+# endpoint pair). _qk for endpoint pairs delegates to geom_utils so all
+# 0.01-px endpoint quantisation flows through one place.
 
 
 def _qk(x: float, y: float) -> Tuple[int, int]:
-    return (int(round(x * _MERGE_QUANTIZE)), int(round(y * _MERGE_QUANTIZE)))
+    return _endpoint_key(x, y, precision=2)
 
 
 def collinear_merge_candidates(segments: List[Dict],
@@ -1769,25 +1774,20 @@ def trunk_split_candidates(segments: List[Dict],
     first split the trunk is gone and the second split applies to one
     of the new sub-trunks.
     """
-    from collections import defaultdict
-
     if not segments:
         return []
 
     # Integer-pixel-rounded degree map (matches regression.py and
     # ``audit_view._free_endpoints``). Sub-pixel coords that round to
     # the same int pixel count as one joint.
-    deg: Dict[Tuple[int, int], int] = defaultdict(int)
-    for s in segments:
-        deg[(int(round(float(s["x1"]))), int(round(float(s["y1"]))))] += 1
-        deg[(int(round(float(s["x2"]))), int(round(float(s["y2"]))))] += 1
+    deg = _node_degree_shared(segments)
 
     out: List[C.Candidate] = []
     for i, ep_seg in enumerate(segments):
         for end in ("1", "2"):
             ex = float(ep_seg[f"x{end}"])
             ey = float(ep_seg[f"y{end}"])
-            if deg[(int(round(ex)), int(round(ey)))] != 1:
+            if deg[_endpoint_key(ex, ey)] != 1:
                 continue
 
             best_j = -1

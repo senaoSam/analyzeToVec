@@ -215,29 +215,12 @@ def _free_endpoints(segments: List[Dict[str, Any]]
 
     Each entry: ``{"x": x, "y": y, "type": seg_type, "seg_idx": i,
     "end": "1"|"2"}``. Degree is computed on integer-pixel-rounded
-    coords (``int(round(x))``) to match ``regression.py``'s
-    ``compute_graph_metrics`` — so the chain tool's endpoint count
-    aligns with the number the user sees from regression / vectorize
-    stats output.
+    coords to match ``regression.py``'s ``compute_graph_metrics`` —
+    so the chain tool's endpoint count aligns with the number the
+    user sees from regression / vectorize stats output.
     """
-    deg: Dict[Any, int] = defaultdict(int)
-
-    def _qk(x: float, y: float) -> Any:
-        return (int(round(float(x))), int(round(float(y))))
-
-    for s in segments:
-        deg[_qk(s["x1"], s["y1"])] += 1
-        deg[_qk(s["x2"], s["y2"])] += 1
-
-    out: List[Dict[str, Any]] = []
-    for i, s in enumerate(segments):
-        for end in ("1", "2"):
-            x = float(s[f"x{end}"])
-            y = float(s[f"y{end}"])
-            if deg[_qk(x, y)] == 1:
-                out.append({"x": x, "y": y, "type": s.get("type", "?"),
-                            "seg_idx": i, "end": end})
-    return out
+    from geom_utils import free_endpoints
+    return free_endpoints(segments)
 
 
 def chain_analysis(events: List[Dict[str, Any]],

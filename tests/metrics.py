@@ -146,11 +146,8 @@ def _endpoint_degree_histogram(segments: Sequence[Dict]) -> Dict[int, int]:
     """Degree histogram on int-pixel-rounded endpoints (matches
     regression.compute_graph_metrics so the two never disagree).
     """
-    nodes: Counter = Counter()
-    for s in segments:
-        nodes[(int(round(float(s["x1"]))), int(round(float(s["y1"]))))] += 1
-        nodes[(int(round(float(s["x2"]))), int(round(float(s["y2"]))))] += 1
-    hist: Counter = Counter(nodes.values())
+    from geom_utils import node_degree
+    hist: Counter = Counter(node_degree(segments).values())
     return {int(k): int(v) for k, v in sorted(hist.items())}
 
 

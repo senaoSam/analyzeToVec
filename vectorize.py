@@ -707,13 +707,20 @@ def _compute_seg_tols(segments: List[Dict],
 def _build_degree_map(segments: List[Dict],
                       quantize: float = 0.01) -> Tuple[Dict[Tuple[int, int], int],
                                                        Dict[Tuple[int, int], set]]:
-    """Return (degree-by-quantized-point, types-by-quantized-point)."""
+    """Return (degree-by-quantized-point, types-by-quantized-point).
+
+    ``quantize=0.01`` (the only value in use) keys at 0.01-px precision —
+    delegated to ``geom_utils.endpoint_key(precision=2)``. Other quantize
+    values are supported for back-compat but no current caller uses them.
+    """
+    from geom_utils import endpoint_key
+    if quantize == 0.01:
+        _key = lambda x, y: endpoint_key(x, y, precision=2)  # noqa: E731
+    else:
+        def _key(x: float, y: float) -> Tuple[int, int]:
+            return (int(round(x / quantize)), int(round(y / quantize)))
     deg: Dict[Tuple[int, int], int] = defaultdict(int)
     types: Dict[Tuple[int, int], set] = defaultdict(set)
-
-    def _key(x: float, y: float) -> Tuple[int, int]:
-        return (int(round(x / quantize)), int(round(y / quantize)))
-
     for s in segments:
         for ex_key, ey_key in (("x1", "y1"), ("x2", "y2")):
             k = _key(s[ex_key], s[ey_key])
@@ -723,6 +730,11 @@ def _build_degree_map(segments: List[Dict],
 
 
 def _qkey(x: float, y: float, quantize: float = 0.01) -> Tuple[int, int]:
+    """0.01-px endpoint key (delegates to ``geom_utils.endpoint_key`` for
+    the default quantize=0.01 case; other values supported for back-compat)."""
+    from geom_utils import endpoint_key
+    if quantize == 0.01:
+        return endpoint_key(x, y, precision=2)
     return (int(round(x / quantize)), int(round(y / quantize)))
 
 

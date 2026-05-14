@@ -184,10 +184,8 @@ def _endpoint_iter(segments: Sequence[Dict]):
 
 def _node_degree_counter(segments: Sequence[Dict]) -> Counter:
     """Count occurrences of each endpoint after 1-px rounding."""
-    nodes: Counter = Counter()
-    for (x, y) in _endpoint_iter(segments):
-        nodes[(int(round(x)), int(round(y)))] += 1
-    return nodes
+    from geom_utils import node_degree
+    return node_degree(segments)
 
 
 # ---------------------------------------------------------------------------
