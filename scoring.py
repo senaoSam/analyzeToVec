@@ -60,6 +60,14 @@ DERIVED_COEFFS: Dict[str, float] = {
     "pseudo_junction":        0.5,
     "opening_attachment":     1.0,
     "manhattan_consistency":  0.5,
+    # Step 22 phase 1: continuous-signal terms. Coefficient 0.0 means
+    # they are computed and recorded for audit but do NOT affect the
+    # score total — bit-identical with pre-step-22 behaviour. Phase 2
+    # (separate commit) bumps these to non-zero weights after audit
+    # data has been measured on real pipeline runs.
+    "opening_body_attach":    0.0,    # continuous: door/window endpoint near wall body
+    "opening_phantom":        0.0,    # penalty: door/window body off chromatic mask
+    "free_endpoint_pressure": 0.0,    # continuous proxy for free_endpoint count
 }
 
 # Evidence thresholds used by phantom / opening_evidence checks.
@@ -70,6 +78,12 @@ EVIDENCE_SAMPLES_PER_PX = 1.0
 
 # Tolerance for "is this endpoint coincident with another point" comparisons.
 ENDPOINT_COINCIDENCE_PX = 1.0
+
+# Step 22: characteristic length for continuous distance signals (px).
+# Roughly a wall stroke width on the reference image; signal value
+# ``exp(-d / OPENING_ATTACH_TAU)`` decays to 1/e at this distance.
+OPENING_ATTACH_TAU = 5.0
+FREE_ENDPOINT_TAU = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +487,187 @@ def opening_attachment_ratio(walls: Sequence[Dict],
     return matched / max(total, 1)
 
 
+def _point_to_axis_segment_distance(px: float, py: float, seg: Dict) -> float:
+    """Perpendicular distance from a point to an axis-aligned segment body.
+
+    Returns the Euclidean distance from ``(px, py)`` to the nearest point on
+    ``seg`` treated as a closed line segment (including endpoints). For an
+    H segment at y=Y running x in [X0, X1]: clip px to [X0, X1], then
+    distance = hypot(px - clipped_px, py - Y). Symmetric for V. Diagonals
+    fall back to a general Euclidean point-line projection; in current
+    pipeline state diagonals shouldn't reach the scorer but the path
+    must exist so this function is robust.
+    """
+    ax = _segments_axis(seg)
+    if ax == "h":
+        x0, x1 = sorted((float(seg["x1"]), float(seg["x2"])))
+        cx = max(x0, min(x1, px))
+        return float(np.hypot(px - cx, py - float(seg["y1"])))
+    if ax == "v":
+        y0, y1 = sorted((float(seg["y1"]), float(seg["y2"])))
+        cy = max(y0, min(y1, py))
+        return float(np.hypot(px - float(seg["x1"]), py - cy))
+    # Diagonal fallback: parametric projection onto the seg line, clamped
+    # to [0, 1] along its body.
+    x0, y0 = float(seg["x1"]), float(seg["y1"])
+    x1, y1 = float(seg["x2"]), float(seg["y2"])
+    dx, dy = x1 - x0, y1 - y0
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return float(np.hypot(px - x0, py - y0))
+    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / L2))
+    return float(np.hypot(px - (x0 + t * dx), py - (y0 + t * dy)))
+
+
+def opening_body_attach(walls: Sequence[Dict],
+                        openings: Sequence[Dict],
+                        tau: float = OPENING_ATTACH_TAU) -> float:
+    """Continuous reward for door/window endpoints sitting on wall bodies.
+
+    For each opening endpoint we compute the perpendicular distance to
+    the nearest wall *body* (not just endpoint), then map distance to
+    a [0, 1] reward via ``exp(-d / tau)``. Sum across all opening
+    endpoints, divided by their count, gives a [0, 1] aggregate.
+
+    Why this complements ``opening_attachment_ratio``:
+      - ``opening_attachment_ratio`` checks endpoint-to-endpoint
+        coincidence within 1 px. Binary: in-range or not.
+      - ``opening_body_attach`` checks endpoint-to-body distance with
+        smooth decay. Provides a gradient even when the endpoint is
+        2-8 px away, so candidates that move an opening *closer* to a
+        wall earn a positive delta before the endpoint actually lands.
+
+    Score gates can use the two together: endpoint match (sharp) +
+    body proximity (smooth) gives the optimizer both fine-grain
+    landing and coarse-grain steering.
+    """
+    if not openings or not walls:
+        return 0.0
+    total = 0.0
+    n = 0
+    for o in openings:
+        for ex_key, ey_key in (("x1", "y1"), ("x2", "y2")):
+            px = float(o[ex_key])
+            py = float(o[ey_key])
+            best_d = float("inf")
+            for w in walls:
+                d = _point_to_axis_segment_distance(px, py, w)
+                if d < best_d:
+                    best_d = d
+                    if best_d < 1e-6:
+                        break
+            total += float(np.exp(-best_d / max(tau, 1e-6)))
+            n += 1
+    return total / max(n, 1)
+
+
+def opening_phantom(openings: Sequence[Dict],
+                    door_mask: Optional[np.ndarray],
+                    window_mask: Optional[np.ndarray],
+                    threshold: float = PHANTOM_EVIDENCE_THRESHOLD) -> float:
+    """Fraction of opening-segment sample pixels with chromatic mask below
+    threshold. Symmetric to ``phantom_penalty`` but for openings on
+    door / window masks.
+
+    A door segment whose body sits on door-coloured pixels returns
+    ~0.0. A door inserted in white space (no chromatic evidence)
+    returns ~1.0. With this signal in place, candidates that drift an
+    opening *off* its chromatic evidence get a negative delta even
+    before they cause floating endpoints.
+    """
+    if not openings:
+        return 0.0
+    h: Optional[int] = None
+    w: Optional[int] = None
+    for m in (door_mask, window_mask):
+        if m is not None:
+            h, w = m.shape[:2]
+            break
+    if h is None:
+        return 0.0
+    door_b = (door_mask > 0) if door_mask is not None else None
+    window_b = (window_mask > 0) if window_mask is not None else None
+    off = 0
+    total = 0
+    for seg in openings:
+        L = _seg_len(seg)
+        if L < 1.0:
+            continue
+        n = max(2, int(round(L * EVIDENCE_SAMPLES_PER_PX)))
+        pts = _sample_along(seg, n).round().astype(int)
+        xs = np.clip(pts[:, 0], 0, w - 1)
+        ys = np.clip(pts[:, 1], 0, h - 1)
+        seg_type = seg.get("type", "")
+        if seg_type == "door" and door_b is not None:
+            on_mask = door_b[ys, xs]
+        elif seg_type == "window" and window_b is not None:
+            on_mask = window_b[ys, xs]
+        else:
+            # Unknown opening type or no mask for it → fall back to
+            # union of available chromatic masks.
+            on_mask = np.zeros(n, dtype=bool)
+            if door_b is not None:
+                on_mask |= door_b[ys, xs]
+            if window_b is not None:
+                on_mask |= window_b[ys, xs]
+        off += int((~on_mask).sum())
+        total += n
+    return off / max(total, 1)
+
+
+def free_endpoint_pressure(segments: Sequence[Dict],
+                           tau: float = FREE_ENDPOINT_TAU) -> float:
+    """Continuous proxy for free_endpoint_count.
+
+    For each degree-1 endpoint, find the distance to the nearest *other*
+    endpoint (degree 1 or higher, any segment). The "pressure" of that
+    endpoint is ``1 - exp(-d / tau)``: zero when the endpoint is on
+    top of another endpoint (would merge with no further work), one
+    when fully isolated.
+
+    Sum across free endpoints gives a [0, N] value that equals N for
+    well-separated free endpoints (same magnitude as the integer
+    ``free_endpoint_count``) but drops smoothly as endpoints approach
+    each other. The score's "free endpoint" gate then has gradient in
+    the sub-pixel regime where the integer count is flat — which is
+    exactly the regime where ``skip_score=True`` was needed for
+    parallel_merge / fuse.
+    """
+    from geom_utils import endpoint_key as _ek
+    deg = _node_degree_counter(segments)
+    free_pts: List[tuple] = []  # (x, y) of degree-1 endpoints
+    all_pts: List[tuple] = []
+    for s in segments:
+        for end in ("1", "2"):
+            x = float(s[f"x{end}"])
+            y = float(s[f"y{end}"])
+            all_pts.append((x, y))
+            if deg[_ek(x, y)] == 1:
+                free_pts.append((x, y))
+    if not free_pts:
+        return 0.0
+    arr = np.array(all_pts, dtype=np.float64) if all_pts else np.zeros((0, 2))
+    total = 0.0
+    for (fx, fy) in free_pts:
+        # Exclude the endpoint itself by requiring d > 0 — there's only
+        # one record of each (fx, fy) when degree == 1, so naively
+        # nearest is itself at d=0. Use the second-smallest if the
+        # nearest is the point itself.
+        dx = arr[:, 0] - fx
+        dy = arr[:, 1] - fy
+        d = np.hypot(dx, dy)
+        # The endpoint's own record is at d == 0. Take the smallest
+        # d > 1e-9 as "nearest other".
+        mask = d > 1e-9
+        if not mask.any():
+            # Pathological: only one endpoint in the whole scene.
+            total += 1.0
+            continue
+        nearest = float(np.min(d[mask]))
+        total += 1.0 - float(np.exp(-nearest / max(tau, 1e-6)))
+    return total
+
+
 def manhattan_consistency(segments: Sequence[Dict],
                           tol_deg: float = 5.0) -> float:
     """Fraction of segments that are within tol_deg of an axis."""
@@ -535,6 +730,15 @@ def compute_score(segments: Sequence[Dict],
     terms["opening_attachment"] = opening_attachment_ratio(walls, openings)
     terms["manhattan_consistency"] = manhattan_consistency(segments)
 
+    # Step 22 phase 1: continuous-signal terms. Computed always but
+    # given coefficient 0.0 in DERIVED_COEFFS so they don't affect the
+    # score total. Their values flow through to audit logs so callers
+    # can measure what they would produce on real pipeline runs before
+    # phase 2 tunes their weights up.
+    terms["opening_body_attach"] = opening_body_attach(walls, openings)
+    terms["opening_phantom"] = opening_phantom(openings, door_mask, window_mask)
+    terms["free_endpoint_pressure"] = -free_endpoint_pressure(segments)
+
     weights = dict(PRIMARY_WEIGHTS)
     if primary_weights:
         weights.update(primary_weights)
@@ -555,7 +759,9 @@ def format_score(score: PipelineScore) -> str:
     for k in ("wall_evidence", "opening_evidence",
               "free_endpoint", "invalid_crossing",
               "phantom", "duplicate", "junction", "pseudo_junction",
-              "opening_attachment", "manhattan_consistency"):
+              "opening_attachment", "manhattan_consistency",
+              "opening_body_attach", "opening_phantom",
+              "free_endpoint_pressure"):
         v = score.terms.get(k, 0.0)
         w = PRIMARY_WEIGHTS.get(k, DERIVED_COEFFS.get(k, 1.0))
         lines.append(f"    {k:24s}  raw={v:+.4f}  weighted={w*v:+.4f}")
