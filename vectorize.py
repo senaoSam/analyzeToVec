@@ -891,6 +891,30 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
                     if _thick < tol / 4.0:
                         continue
 
+                # Stub-preservation guard. The zero-length guard above
+                # only catches *full* collapse; this catches *partial*
+                # truncation. If the snap target lies strictly inside
+                # the segment's axis extent, the loose endpoint is not a
+                # free end to anchor -- it's the end of a wall stub
+                # extending past the trunk junction. A small truncation
+                # is acceptable skel-jitter cleanup; a larger one would
+                # delete a real stub. Floor = max(1.5 x local_thickness,
+                # tol / 4) so the threshold scales with both the wall's
+                # own thickness and the image-size-aware tol.
+                if my_axis == "v":
+                    _other_c = float(seg[f"y{_other}"])
+                    _loose_c, _snap_c = ey, snap_y
+                else:
+                    _other_c = float(seg[f"x{_other}"])
+                    _loose_c, _snap_c = ex, snap_x
+                _lo, _hi = sorted((_other_c, _loose_c))
+                if _lo + 1e-3 < _snap_c < _hi - 1e-3:
+                    _tail = abs(_loose_c - _snap_c)
+                    _thick = float(seg.get("local_thickness", 0.0))
+                    _stub_floor = max(_thick * 1.5, tol / 4.0)
+                    if _tail > _stub_floor:
+                        continue
+
                 # Evidence gate on trunk-extension stretch.
                 if need_extend is not None and masks is not None:
                     trunk_mask = masks.get(trunk["type"])
@@ -2009,6 +2033,14 @@ def brute_force_ray_extend(lines: List[Dict],
                 ox = float(seg[f"x{other_end}"])
                 oy = float(seg[f"y{other_end}"])
 
+                # Stub-preservation floor. Matches the t_snap_with_extension
+                # guard: a truncating snap (line falls strictly between oy/ey
+                # for vertical or ox/ex for horizontal) is fine for skel
+                # jitter, but anything beyond the floor would delete a real
+                # wall extending past the trunk junction.
+                _thick_self = float(seg.get("local_thickness", 0.0))
+                _stub_floor = max(_thick_self * 1.5, tol / 4.0)
+
                 if seg_ax == "h":
                     free_dir = 1.0 if ex > ox else -1.0
                     best_d = tol
@@ -2021,6 +2053,10 @@ def brute_force_ray_extend(lines: List[Dict],
                         if abs(line_x - ox) < 1e-6:
                             continue
                         if (line_x - ox) * free_dir <= 0:
+                            continue
+                        # No-shrink guard: skip trunks that would truncate
+                        # the segment by more than the stub floor.
+                        if (line_x - ex) * free_dir < -_stub_floor:
                             continue
                         lo, hi = sorted((float(v["y1"]), float(v["y2"])))
                         if ey < lo - tol or ey > hi + tol:
@@ -2055,6 +2091,10 @@ def brute_force_ray_extend(lines: List[Dict],
                         if abs(line_y - oy) < 1e-6:
                             continue
                         if (line_y - oy) * free_dir <= 0:
+                            continue
+                        # No-shrink guard: skip trunks that would truncate
+                        # the segment by more than the stub floor.
+                        if (line_y - ey) * free_dir < -_stub_floor:
                             continue
                         lo, hi = sorted((float(h["x1"]), float(h["x2"])))
                         if ex < lo - tol or ex > hi + tol:

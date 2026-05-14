@@ -211,6 +211,34 @@ def proximal_bridge_candidates(segments: List[Dict],
             if d2 < 1.0:
                 continue
 
+            # Redundancy guard. If b sits on a's owning segment's body
+            # (or symmetrically), the connectivity already exists along
+            # that segment's body -- downstream trunk_split will
+            # materialise the junction without needing a new wall.
+            # Adding the bridge anyway would create a duplicate segment
+            # overlapping the existing body, which scoring's
+            # ``duplicate_penalty`` doesn't always outweigh against the
+            # free_endpoint reduction it gains.
+            def _on_body(seg: Dict, px: float, py: float) -> bool:
+                ax = _axis_of(seg)
+                sx1, sy1 = float(seg["x1"]), float(seg["y1"])
+                sx2, sy2 = float(seg["x2"]), float(seg["y2"])
+                if ax == "v":
+                    if abs(px - sx1) > colinear_tol:
+                        return False
+                    lo, hi = sorted((sy1, sy2))
+                    return lo - 1e-3 <= py <= hi + 1e-3
+                if ax == "h":
+                    if abs(py - sy1) > colinear_tol:
+                        return False
+                    lo, hi = sorted((sx1, sx2))
+                    return lo - 1e-3 <= px <= hi + 1e-3
+                return False
+            if _on_body(segments[a["seg"]], b["x"], b["y"]):
+                continue
+            if _on_body(segments[b["seg"]], a["x"], a["y"]):
+                continue
+
             # Step 4.9.6: stroke-width compatibility. Reject pairs whose
             # host wall segments have very different local thickness —
             # a thin-wall endpoint should not be bridged to a thick-wall
@@ -1830,12 +1858,27 @@ def trunk_split_candidates(segments: List[Dict],
                 continue
 
             trunk = segments[best_j]
+            # Snap the split point onto the trunk's exact perp coord so
+            # both sub-segments stay strict-axis-aligned (the free
+            # endpoint may sit within ``pos_eps`` of the trunk line but
+            # not exactly on it; using its raw coord would leave sub_a
+            # with x1 == trunk.x1 but x2 == ex and propagate a ULP-level
+            # diagonal into the output).
+            trunk_ax = _axis_of(trunk)
+            if trunk_ax == "v":
+                split_x = float(trunk["x1"])
+                split_y = ey
+            elif trunk_ax == "h":
+                split_x = ex
+                split_y = float(trunk["y1"])
+            else:
+                split_x, split_y = ex, ey
             sub_a = dict(trunk)
-            sub_a["x2"] = ex
-            sub_a["y2"] = ey
+            sub_a["x2"] = split_x
+            sub_a["y2"] = split_y
             sub_b = dict(trunk)
-            sub_b["x1"] = ex
-            sub_b["y1"] = ey
+            sub_b["x1"] = split_x
+            sub_b["y1"] = split_y
             out.append(C.Candidate(
                 op="trunk_split",
                 add=[sub_a, sub_b],
@@ -1844,7 +1887,7 @@ def trunk_split_candidates(segments: List[Dict],
                 meta={
                     "trunk_idx": best_j,
                     "trunk_type": trunk.get("type"),
-                    "split_at": (ex, ey),
+                    "split_at": (split_x, split_y),
                     "free_endpoint_idx": i,
                     "free_endpoint_end": end,
                     "free_endpoint_type": ep_seg.get("type"),
