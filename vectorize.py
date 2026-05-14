@@ -2478,6 +2478,30 @@ def vectorize_bgr(bgr: np.ndarray, *,
 
     _log("Geometric optimization (may take a while on large images)...")
     # --- Geometric optimization pipeline --------------------------------
+    #
+    # Step 23 phase 1 classification (todo.md §6):
+    #
+    #   Phase A (unconditional per-seg / per-bucket transform; no score
+    #   gate, no inter-candidate dependency):
+    #       _accept_axis_align_candidates         (force ±5°->axis)
+    #       _accept_manhattan_force_axis_candidates (force strict H/V)
+    #       _accept_canonicalize_offset_candidates  (offset bucket median)
+    #
+    #   Phase B (topology candidates; runs sequentially today in the
+    #   hand-tuned cascade below — target of step 23 phase 2 collapse
+    #   into ``master_accept_loop``):
+    #       all other ``_accept_*_candidates`` calls + the legacy
+    #       in-place passes (brute_force_ray_extend, insert_missing_
+    #       connectors).
+    #
+    # The cascade is preserved as-is in phase 1. master_accept_loop is
+    # written and unit-tested in master_loop.py but not wired in here —
+    # the Phase B passes that use ``skip_score=True`` (parallel_merge,
+    # fuse, 2d_cluster) still need step 22 to produce continuous score
+    # signals strong enough to gate them correctly before they can be
+    # safely routed through master_accept_loop. See ``master_loop.py``
+    # docstring for the migration plan.
+    #
     # (1) Force orthogonality (segments within ±5° of an axis become exactly H/V).
     # Step 9 phase 1: candidate-based axis-snap. Same per-segment angle
     # gate as legacy; per-seg mutates are independent so we apply in batch
