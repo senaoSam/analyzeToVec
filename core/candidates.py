@@ -176,7 +176,7 @@ class SpatialGate:
         across the full segment list. Convenience for passes that operate
         on free endpoints.
         """
-        from geom_utils import node_degree
+        from .geom_utils import node_degree
         cnt = node_degree(self._segments)
         return [pt for pt, c in cnt.items() if c == 1]
 

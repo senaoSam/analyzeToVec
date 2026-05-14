@@ -21,8 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-import candidates as C  # noqa: E402
-from master_loop import master_accept_loop  # noqa: E402
+from core import candidates as C  # noqa: E402
+from core.master_loop import master_accept_loop  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

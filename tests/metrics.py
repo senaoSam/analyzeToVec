@@ -51,8 +51,8 @@ _REPO = os.path.dirname(_HERE)
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-import regression as R  # noqa: E402
-import scoring as S  # noqa: E402
+from tools import regression as R  # noqa: E402
+from core import scoring as S  # noqa: E402
 from tests.invariants import (  # noqa: E402
     _axis_of,
     check_openings_anchored,
@@ -146,7 +146,7 @@ def _endpoint_degree_histogram(segments: Sequence[Dict]) -> Dict[int, int]:
     """Degree histogram on int-pixel-rounded endpoints (matches
     regression.compute_graph_metrics so the two never disagree).
     """
-    from geom_utils import node_degree
+    from core.geom_utils import node_degree
     hist: Counter = Counter(node_degree(segments).values())
     return {int(k): int(v) for k, v in sorted(hist.items())}
 

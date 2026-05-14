@@ -198,7 +198,7 @@ def _endpoint_iter(segments: Sequence[Dict]):
 
 def _node_degree_counter(segments: Sequence[Dict]) -> Counter:
     """Count occurrences of each endpoint after 1-px rounding."""
-    from geom_utils import node_degree
+    from .geom_utils import node_degree
     return node_degree(segments)
 
 
@@ -633,7 +633,7 @@ def free_endpoint_pressure(segments: Sequence[Dict],
     exactly the regime where ``skip_score=True`` was needed for
     parallel_merge / fuse.
     """
-    from geom_utils import endpoint_key as _ek
+    from .geom_utils import endpoint_key as _ek
     deg = _node_degree_counter(segments)
     free_pts: List[tuple] = []  # (x, y) of degree-1 endpoints
     all_pts: List[tuple] = []

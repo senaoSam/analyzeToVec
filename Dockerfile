@@ -11,9 +11,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Source files. Anything not listed here (srcImg/, output/, .git/) stays out
-# via .dockerignore.
+# API + pipeline. ``core/`` is the supporting package vectorize.py loads from
+# (candidates, generators, scoring, geom_utils, audit, master_loop,
+# canonical_line). ``tools/`` is for research / harness scripts and is
+# deliberately NOT shipped — see .dockerignore.
 COPY vectorize.py api.py ./
+COPY core ./core
 
 ENV PYTHONUNBUFFERED=1 \
     PORT=10000

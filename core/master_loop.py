@@ -17,7 +17,7 @@ the passes that currently use ``skip_score=True``.
 
 Use it directly:
 
-    from master_loop import master_accept_loop
+    from core.master_loop import master_accept_loop
 
     state = master_accept_loop(
         initial_segments,
@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Optional, Sequence
 
-import candidates as C
+from . import candidates as C
 
 
 # Candidate stream contract: a generator is any callable that takes the
@@ -143,7 +143,7 @@ def master_accept_loop(
 
         if audit_recorder is not None:
             try:
-                from audit import candidate_position
+                from .audit import candidate_position
                 pos = candidate_position(best_cand)
             except Exception:
                 pos = None

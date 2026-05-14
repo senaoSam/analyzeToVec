@@ -33,7 +33,7 @@ REPO = os.path.dirname(HERE)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-import regression as R  # noqa: E402
+from tools import regression as R  # noqa: E402
 
 
 PANEL_BG = (255, 255, 255)         # white

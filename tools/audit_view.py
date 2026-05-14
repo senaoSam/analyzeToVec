@@ -36,9 +36,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
+
+# Allow running as ``py -3 tools/audit_view.py`` from the repo root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
 # Colors in BGR (OpenCV).
@@ -219,7 +225,7 @@ def _free_endpoints(segments: List[Dict[str, Any]]
     so the chain tool's endpoint count aligns with the number the
     user sees from regression / vectorize stats output.
     """
-    from geom_utils import free_endpoints
+    from core.geom_utils import free_endpoints
     return free_endpoints(segments)
 
 

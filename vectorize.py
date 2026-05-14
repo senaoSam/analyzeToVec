@@ -26,8 +26,8 @@ import cv2
 import numpy as np
 from skimage.morphology import skeletonize
 
-from canonical_line import compute_local_thickness
-from audit import candidate_position as _audit_position
+from core.canonical_line import compute_local_thickness
+from core.audit import candidate_position as _audit_position
 
 # Segment fields that are pipeline-internal — computed and used inside
 # vectorize_bgr but stripped before the result leaves this module. Keeps
@@ -713,7 +713,7 @@ def _build_degree_map(segments: List[Dict],
     delegated to ``geom_utils.endpoint_key(precision=2)``. Other quantize
     values are supported for back-compat but no current caller uses them.
     """
-    from geom_utils import endpoint_key
+    from core.geom_utils import endpoint_key
     if quantize == 0.01:
         _key = lambda x, y: endpoint_key(x, y, precision=2)  # noqa: E731
     else:
@@ -732,7 +732,7 @@ def _build_degree_map(segments: List[Dict],
 def _qkey(x: float, y: float, quantize: float = 0.01) -> Tuple[int, int]:
     """0.01-px endpoint key (delegates to ``geom_utils.endpoint_key`` for
     the default quantize=0.01 case; other values supported for back-compat)."""
-    from geom_utils import endpoint_key
+    from core.geom_utils import endpoint_key
     if quantize == 0.01:
         return endpoint_key(x, y, precision=2)
     return (int(round(x / quantize)), int(round(y / quantize)))
@@ -771,8 +771,8 @@ def t_snap_with_extension(segments: List[Dict], tol: float,
 
     Returns a fresh list (legacy convention).
     """
-    import candidates as C
-    import scoring as S
+    from core import candidates as C
+    from core import scoring as S
 
     if not segments:
         return []
@@ -1034,9 +1034,9 @@ def _accept_bridge_candidates(lines: List[Dict],
     same call. Subsequent candidates that reference a locked endpoint
     are skipped — the next outer call (if any) regenerates.
     """
-    import candidates as C
-    import generators as G
-    import scoring as S
+    from core import candidates as C
+    from core import generators as G
+    from core import scoring as S
 
     if not lines:
         return list(lines)
@@ -1183,8 +1183,8 @@ def _run_merge_loop(lines: List[Dict],
     score doesn't penalise the merge for "losing" a duplicate skeleton
     artefact junction.
     """
-    import candidates as C
-    import scoring as S
+    from core import candidates as C
+    from core import scoring as S
 
     if not lines:
         return list(lines)
@@ -1272,7 +1272,7 @@ def _accept_merge_candidates(lines: List[Dict],
     the first that passes the gate. Terminates in 1-3 passes for
     ~150-segment inputs (linear in chain length).
     """
-    import generators as G
+    from core import generators as G
     return _run_merge_loop(
         lines,
         regenerate=lambda segs: G.collinear_merge_candidates(
@@ -1324,7 +1324,7 @@ def _accept_parallel_merge_candidates(lines: List[Dict],
     duplicate), then tighter perp_dist, then longest merge — the
     cleanest / most-genuine merges land first.
     """
-    import generators as G
+    from core import generators as G
     return _run_merge_loop(
         lines,
         regenerate=lambda segs: G.parallel_merge_candidates(
@@ -1360,8 +1360,8 @@ def _accept_t_junction_snap_candidates(lines: List[Dict],
 
     Closing zero-length filter mirrors legacy.
     """
-    import candidates as C
-    import generators as G
+    from core import candidates as C
+    from core import generators as G
     if not lines:
         return list(lines)
     cands = G.t_junction_snap_candidates(lines, tol=tol)
@@ -1384,8 +1384,8 @@ def _accept_manhattan_force_axis_candidates(lines: List[Dict]) -> List[Dict]:
     segments to compute distance-transform thicknesses) sees the same
     sequence legacy produced.
     """
-    import candidates as C
-    import generators as G
+    from core import candidates as C
+    from core import generators as G
     if not lines:
         return list(lines)
     cands = G.manhattan_force_axis_candidates(lines)
@@ -1443,9 +1443,9 @@ def _accept_canonicalize_offset_candidates(
     No score gate, no fixed-point loop: clusters are disjoint by the
     legacy partition, batch apply is correct.
     """
-    import candidates as C
-    import generators as G
-    from canonical_line import compute_local_thickness as _local_thickness
+    from core import candidates as C
+    from core import generators as G
+    from core.canonical_line import compute_local_thickness as _local_thickness
 
     if not lines:
         return list(lines)
@@ -1511,9 +1511,9 @@ def _accept_chromatic_anchor_candidates(lines: List[Dict],
     has been anchored by one bridge, further candidates targeting the
     same endpoint are dropped — the endpoint is no longer floating.
     """
-    import candidates as C
-    import generators as G
-    import scoring as S
+    from core import candidates as C
+    from core import generators as G
+    from core import scoring as S
 
     if not lines:
         return list(lines)
@@ -1592,8 +1592,8 @@ def _accept_trunk_split_candidates(lines: List[Dict]) -> List[Dict]:
     geometric gate (degree=1 endpoint + perp_dist=0 + strictly interior)
     is the entire safety net.
     """
-    import candidates as C
-    import generators as G
+    from core import candidates as C
+    from core import generators as G
     if not lines:
         return list(lines)
     current = list(lines)
@@ -1627,8 +1627,8 @@ def _accept_truncate_overshoot_candidates(lines: List[Dict],
     Closing zero-length filter mirrors legacy's
     ``[s for s in segs if (s['x1'], s['y1']) != (s['x2'], s['y2'])]``.
     """
-    import candidates as C
-    import generators as G
+    from core import candidates as C
+    from core import generators as G
     if not lines:
         return list(lines)
     cands = G.truncate_overshoot_candidates(lines, tol=tol)
@@ -1664,7 +1664,7 @@ def _accept_axis_align_candidates(lines: List[Dict],
     geometric gate (angle within tol_deg of an axis) is reproduced
     exactly inside ``axis_align_candidates``.
     """
-    import generators as G
+    from core import generators as G
     if not lines:
         return list(lines)
     cands = G.axis_align_candidates(lines, tol_deg=tol_deg)
@@ -1730,7 +1730,7 @@ def _accept_cluster_collinear_merge_candidates(
     safety net (geometric gates: same-type + same-axis-bucket + perp
     cluster within perp_tol + along sweep within gap_tol).
     """
-    import generators as G
+    from core import generators as G
     if not lines:
         return list(lines)
     cands = G.cluster_collinear_merge_candidates(
@@ -1767,8 +1767,8 @@ def _accept_2d_cluster_candidates(lines: List[Dict],
     create new components for endpoints that ALREADY snapped to a
     canonical, which legacy doesn't do.
     """
-    import candidates as C
-    import generators as G
+    from core import candidates as C
+    from core import generators as G
     if not lines:
         return list(lines)
 
@@ -1817,8 +1817,8 @@ def _accept_t_project_candidates(lines: List[Dict],
     valid trunk (the common case after canonical_line normalises lines),
     order doesn't matter at all.
     """
-    import candidates as C
-    import generators as G
+    from core import candidates as C
+    from core import generators as G
     if not lines:
         return list(lines)
 
@@ -1880,7 +1880,7 @@ def _accept_fuse_candidates(lines: List[Dict],
     sampled from the distance transform stays valid across
     iterations.
     """
-    import generators as G
+    from core import generators as G
     if not lines:
         return list(lines)
 
@@ -1937,8 +1937,8 @@ def brute_force_ray_extend(lines: List[Dict],
     Same call signature as legacy, plus optional masks/evidence kwargs for
     scoring. Cascading is bounded to 4 passes, matching legacy behaviour.
     """
-    import candidates as C
-    import scoring as S
+    from core import candidates as C
+    from core import scoring as S
 
     if not lines:
         return
@@ -2161,8 +2161,8 @@ def insert_missing_connectors(lines: List[Dict],
     parameter but no longer hard-rejects — it is now an audit floor that
     callers can tighten if they want a more conservative pass.
     """
-    import candidates as C
-    import scoring as S
+    from core import candidates as C
+    from core import scoring as S
 
     if not lines:
         return
@@ -2411,7 +2411,7 @@ def vectorize_bgr(bgr: np.ndarray, *,
 
     audit_recorder = None
     if audit_path is not None:
-        from audit import AuditRecorder
+        from core.audit import AuditRecorder
         audit_recorder = AuditRecorder()
 
     h, w = bgr.shape[:2]

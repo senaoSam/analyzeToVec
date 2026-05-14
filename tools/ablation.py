@@ -24,7 +24,12 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 
-import vectorize as V
+# Allow running as ``py -3 tools/ablation.py`` from the repo root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import vectorize as V  # noqa: E402
 
 
 REF_IMAGES = [
@@ -265,7 +270,7 @@ def metrics(segments: List[Dict], wall_mask: np.ndarray, shape: Tuple[int, int])
 
 
 def main() -> None:
-    out_csv = os.path.join(os.path.dirname(__file__), "output", "ablation_report.csv")
+    out_csv = os.path.join(_REPO_ROOT, "output", "ablation_report.csv")
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     rows = []

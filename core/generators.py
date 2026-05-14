@@ -37,9 +37,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-import candidates as C
-from canonical_line import compute_local_thickness
-from geom_utils import endpoint_key as _endpoint_key, node_degree as _node_degree_shared
+from . import candidates as C
+from .canonical_line import compute_local_thickness
+from .geom_utils import endpoint_key as _endpoint_key, node_degree as _node_degree_shared
 
 
 # Wall-priority table — keep in sync with vectorize.TYPE_PRIORITY. Walls

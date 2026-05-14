@@ -23,7 +23,14 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-import vectorize as V
+# Allow ``py -3 tools/regression.py`` from the repo root — make sure the
+# project root is on sys.path so ``import vectorize`` / ``from core ...``
+# / ``from tests.metrics ...`` resolve regardless of CWD.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import vectorize as V  # noqa: E402
 
 # Step 18: metric + invariant layer. Imported lazily inside ``run_one_case``
 # to avoid forcing tests/ on the sys.path for callers that don't need it.
@@ -57,7 +64,7 @@ TOTAL_LENGTH_CHANGE_RATIO_MAX = 0.10
 # Paths
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = _REPO_ROOT
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 CASES_DIR = os.path.join(TESTS_DIR, "cases")
 BASELINE_DIR = os.path.join(TESTS_DIR, "baseline")
@@ -72,7 +79,7 @@ def normalize_lines(lines: List[Dict]) -> List[Tuple]:
     """Round coords to 1 px, put endpoints in canonical (min,max) order,
     sort by (type, x1, y1, x2, y2). Ignore non-geometric fields.
     """
-    from geom_utils import endpoint_keys_for_segment
+    from core.geom_utils import endpoint_keys_for_segment
     norm: List[Tuple] = []
     for s in lines:
         t = s.get("type", "")
@@ -173,7 +180,7 @@ def compute_distance_metrics(mask_a: np.ndarray, mask_b: np.ndarray) -> Dict[str
 def compute_graph_metrics(lines: List[Dict]) -> Dict:
     """num_segments / count_by_type / free_endpoints / num_short_segments / total_length_by_type."""
     from collections import Counter
-    from geom_utils import endpoint_keys_for_segment
+    from core.geom_utils import endpoint_keys_for_segment
     count_by_type: Counter = Counter()
     total_length_by_type: Dict[str, float] = {}
     nodes: Counter = Counter()

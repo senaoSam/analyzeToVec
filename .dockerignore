@@ -9,6 +9,11 @@ venv/
 srcImg/
 output/
 
+# Research / harness scripts — not used by the API.
+tools/
+tests/
+preview.py
+
 # Editor / OS noise.
 .vscode/
 .idea/
